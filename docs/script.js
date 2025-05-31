@@ -1,4 +1,65 @@
-console.log('script.js: Script loaded');
+// --- Начало кода для эмуляции/дополнения Telegram WebApp --- 
+// Проверяем, запущено ли приложение внутри Telegram
+const isTelegramEnv = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.query_id;
+
+if (!isTelegramEnv) {
+    console.warn('Приложение запущено вне Telegram или initDataUnsafe отсутствует. Эмуляция/дополнение Telegram WebApp API для локальной отладки.');
+    
+    window.Telegram = window.Telegram || {}; // Создаем Telegram, если его нет
+    window.Telegram.WebApp = window.Telegram.WebApp || {}; // Создаем WebApp, если его нет
+
+    // Принудительно устанавливаем/дополняем initDataUnsafe и другие необходимые поля
+    window.Telegram.WebApp.initDataUnsafe = window.Telegram.WebApp.initDataUnsafe || {};
+    window.Telegram.WebApp.initDataUnsafe.user = window.Telegram.WebApp.initDataUnsafe.user || {
+        id: 668673256, // <<<=== ПОСТАВЬТЕ СЮДА ВАШ РЕАЛЬНЫЙ TELEGRAM ID для тестов
+        first_name: 'Debug',
+        last_name: 'User',
+        username: 'whoami_debug_test', // Можно использовать ваш ник или тестовый
+        language_code: 'ru'
+    };
+    // Убедимся, что user.id точно есть
+    if (!window.Telegram.WebApp.initDataUnsafe.user.id) {
+        window.Telegram.WebApp.initDataUnsafe.user.id = 668673256; // <<<=== И СЮДА ВАШ РЕАЛЬНЫЙ ID
+        console.log('Принудительно установлен тестовый user.id в эмуляции.');
+    }
+
+    window.Telegram.WebApp.initData = window.Telegram.WebApp.initData || `query_id=EMULATED_QUERY_ID&user=${JSON.stringify(window.Telegram.WebApp.initDataUnsafe.user)}&auth_date=${Math.floor(Date.now() / 1000)}&hash=emulated_hash`;
+
+    // Дополняем основные функции, если они отсутствуют
+    const webAppDefaults = {
+        expand: function() { console.log('Эмуляция: WebApp.expand()'); },
+        ready: function() { console.log('Эмуляция: WebApp.ready()'); },
+        sendData: function(data) { console.log('Эмуляция: WebApp.sendData()', data); },
+        close: function() { console.log('Эмуляция: WebApp.close()'); },
+        setHeaderColor: function(color_key) { console.log('Эмуляция: WebApp.setHeaderColor()', color_key); },
+        setBackgroundColor: function(color_key) { console.log('Эмуляция: WebApp.setBackgroundColor()', color_key); },
+        themeParams: {
+            bg_color: '#ffffff', text_color: '#000000', hint_color: '#707070',
+            link_color: '#007aff', button_color: '#007aff', button_text_color: '#ffffff',
+            secondary_bg_color: "#f0f0f0",
+        },
+        colorScheme: 'light', version: '6.7',
+        MainButton: { /* ... (можно оставить как было или упростить) ... */ isVisible: false, show: function(){}, hide: function(){} },
+        BackButton: { /* ... */ isVisible: false, show: function(){}, hide: function(){} },
+        HapticFeedback: { impactOccurred: function(s){}, notificationOccurred: function(t){}, selectionChanged: function(){} },
+        platform: 'tdesktop',
+        isClosingConfirmationEnabled: false,
+        enableClosingConfirmation: function() { this.isClosingConfirmationEnabled = true; },
+        disableClosingConfirmation: function() { this.isClosingConfirmationEnabled = false; },
+    };
+
+    for (const key in webAppDefaults) {
+        if (typeof window.Telegram.WebApp[key] === 'undefined') {
+            window.Telegram.WebApp[key] = webAppDefaults[key];
+        }
+    }
+    // Убедимся, что MainButton существует и имеет базовые методы, если их нет
+    window.Telegram.WebApp.MainButton = window.Telegram.WebApp.MainButton || {isVisible: false, show: function(){}, hide: function(){}};
+     // И так далее для других важных объектов, если они используются напрямую
+}
+// --- Конец кода для эмуляции/дополнения Telegram WebApp ---
+
+console.log('script.js: Script loaded. Environment:', isTelegramEnv ? 'Telegram' : 'Browser/Emulated');
 const tg = window.Telegram.WebApp;
 tg.expand(); // Expand the Web App to full height
 
@@ -6,6 +67,13 @@ const criticalErrorDiv = document.getElementById('error');
 const feedbackDiv = document.getElementById('feedback');
 const streakListDiv = document.getElementById('streakList');
 let currentUserId = null;
+
+// Определяем базовый URL для API
+const IS_LOCALHOST_DEBUG = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
+const API_BASE_URL = IS_LOCALHOST_DEBUG ? 'http://localhost:8080' : ''; // Если на GitHub Pages, используем относительный путь (предполагая прокси или тот же домен)
+                                                                    // Для локального теста с ботом на localhost:8080, API_BASE_URL должен быть 'http://localhost:8080'
+                                                                    // Если WebApp на GitHub Pages, а бот на localhost, то CORS должен быть настроен
+                                                                    // и здесь должен быть 'http://localhost:8080'
 
 console.log('script.js: Variables initialized');
 
@@ -40,7 +108,7 @@ async function fetchStreaks() {
     streakListDiv.innerHTML = '<div class="loading">Загрузка стриков...</div>';
     criticalErrorDiv.style.display = 'none';
 
-    const apiUrl = '/api/webapp/user_streaks?user_id=' + currentUserId;
+    const apiUrl = API_BASE_URL + '/api/webapp/user_streaks?user_id=' + currentUserId;
     console.log('script.js: Attempting to fetch from:', apiUrl);
 
     try {
@@ -95,7 +163,7 @@ async function markToday(partnerId, partnerUsername) {
     }
     showFeedback('Отмечаем стрик с @' + partnerUsername + '...', false); // Initial feedback
 
-    const apiUrlMark = '/api/webapp/mark_today';
+    const apiUrlMark = API_BASE_URL + '/api/webapp/mark_today';
     console.log('script.js: Attempting to POST to:', apiUrlMark, 'with data:', { user_id: currentUserId, partner_id: partnerId });
 
     try {

@@ -847,14 +847,12 @@ async def main():
 
     # Настройка CORS
     cors = aiohttp_cors.setup(app, defaults={
-        "https://whoami-debug.github.io": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True, # Для cookie или Authorization заголовков
             expose_headers="*",
-            allow_headers="*",  # Разрешаем Content-Type и другие необходимые заголовки
-            allow_methods="*"   # Разрешаем GET и POST
-        ),
-        # Можно добавить и другие доверенные источники, например, для локальной разработки
-        # "http://localhost:8000": aiohttp_cors.ResourceOptions(...),
+            allow_headers="*", # Разрешить все заголовки, включая Content-Type
+            allow_methods="*"  # Разрешить все методы (GET, POST, OPTIONS и т.д.)
+        )
     })
 
     # Применяем CORS ко всем маршрутам, определенным в `routes` (ваша RouteTableDef)
