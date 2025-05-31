@@ -197,4 +197,15 @@ class Database:
                 streak_count = await self.get_streak_count(user_id, partner_id)
                 result.append((username, streak_count))
 
-            return result 
+            return result
+
+    async def is_streak_pair(self, user_id: int, partner_id: int) -> bool:
+        """Проверяет, существует ли пара для отслеживания стрика"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute("""
+                SELECT 1 FROM streak_pairs 
+                WHERE (user_id = ? AND partner_id = ?)
+                OR (user_id = ? AND partner_id = ?)
+            """, (user_id, partner_id, partner_id, user_id)) as cursor:
+                result = await cursor.fetchone()
+                return bool(result) 

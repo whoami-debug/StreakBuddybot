@@ -10,6 +10,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.enums import ChatType
 from aiogram.types import Message, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from aiohttp import web
+import aiosqlite
 
 from database import Database
 from config import BOT_TOKEN, WEBAPP_URL
@@ -403,41 +404,64 @@ async def handle_message(message: Message):
     
     # Обработка личных сообщений
     if message.chat.type == ChatType.PRIVATE:
-        if user_id in dm_partners and dm_partners[user_id]:
-            today = datetime.now(timezone.utc).date()
-            
-            # Проверяем каждого собеседника
-            for partner_username, partner_id in dm_partners[user_id].items():
-                if partner_id is not None:  # Пропускаем неподтверждённых собеседников
-                    await db.mark_message(user_id, partner_id, today)
-                    
-                    # Проверяем общение
-                    streak_updates = await db.check_streaks(user_id, partner_id, today)
-                    for other_username, streak, is_new_streak in streak_updates:
-                        if is_new_streak:
-                            days_word = get_days_word(streak)
-                            await message.answer(
-                                f"🎉 Поздравляем!\n"
-                                f"Вы и @{other_username} общаетесь уже {streak} {days_word} подряд!"
-                            )
+        # Отправляем актуальные данные в веб-интерфейс
+        await send_streaks_data(user_id)
     
     # Обработка групповых сообщений
     else:
-        # Отмечаем сообщение на сегодня
         today = datetime.now(timezone.utc).date()
+        
+        # Получаем всех активных пользователей в группе
+        async with aiosqlite.connect(db.db_name) as conn:
+            # Получаем всех пользователей, которые писали сегодня в группе
+            async with conn.execute("""
+                SELECT DISTINCT u.user_id, u.username 
+                FROM messages m
+                JOIN users u ON m.user_id = u.user_id
+                WHERE m.chat_date = ? AND m.partner_id = ?
+                AND m.user_id != ?
+            """, (today, chat_id, user_id)) as cursor:
+                active_users = await cursor.fetchall()
+
+        # Отмечаем сообщение текущего пользователя
         await db.mark_message(user_id, chat_id, today)
         
-        # Проверяем общение с другими пользователями
-        streak_updates = await db.check_streaks(user_id, chat_id, today)
-        
-        for other_username, streak, is_new_streak in streak_updates:
-            if is_new_streak:
-                user_mention = f"@{username}" if username != str(user_id) else message.from_user.first_name
-                other_mention = f"@{other_username}"
-                days_word = get_days_word(streak)
-                await message.answer(
-                    f"🎉 {user_mention} и {other_mention} общаются уже {streak} {days_word} подряд!"
-                )
+        # Проверяем общение с каждым активным пользователем
+        for other_id, other_username in active_users:
+            # Проверяем, есть ли уже пара для отслеживания
+            if not await db.is_streak_pair(user_id, other_id):
+                # Если нет, создаем пару автоматически
+                await db.add_streak_pair(user_id, other_id)
+            
+            # Проверяем, отметили ли оба пользователя общение
+            if await db.check_both_marked(user_id, other_id, today):
+                # Получаем текущий стрик
+                streak_count = await db.get_streak_count(user_id, other_id)
+                days_word = get_days_word(streak_count)
+                
+                # Отправляем уведомление только если стрик увеличился
+                if streak_count > 0:
+                    user_mention = f"@{username}" if username != str(user_id) else message.from_user.first_name
+                    other_mention = f"@{other_username}"
+                    
+                    await message.answer(
+                        f"🎉 {user_mention} и {other_mention} общаются уже {streak_count} {days_word} подряд!"
+                    )
+                    
+                    # Отправляем обновленные данные в веб-интерфейс обоим пользователям
+                    await send_streaks_data(user_id)
+                    await send_streaks_data(other_id)
+
+async def is_streak_pair(user_id: int, partner_id: int) -> bool:
+    """Проверяет, существует ли пара для отслеживания стрика"""
+    async with aiosqlite.connect(db.db_name) as conn:
+        async with conn.execute("""
+            SELECT 1 FROM streak_pairs 
+            WHERE (user_id = ? AND partner_id = ?)
+            OR (user_id = ? AND partner_id = ?)
+        """, (user_id, partner_id, partner_id, user_id)) as cursor:
+            result = await cursor.fetchone()
+            return bool(result)
 
 async def main():
     """Главная функция запуска бота"""
