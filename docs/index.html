@@ -154,20 +154,25 @@
 
         // Выбор пользователя
         function selectUser() {
-            tg.showPopup({
-                title: 'Выберите пользователя',
-                message: 'С кем вы хотите отслеживать общение?',
-                buttons: [
-                    {id: "select", type: "default", text: "Выбрать из контактов"},
-                    {id: "cancel", type: "cancel", text: "Отмена"}
-                ]
-            }, function(buttonId) {
-                if (buttonId === 'select') {
-                    // Здесь будет интеграция с ботом для выбора пользователя
+            tg.contacts.requestContact().then(contact => {
+                if (contact) {
                     tg.sendData(JSON.stringify({
-                        action: 'select_user'
+                        action: 'select_user',
+                        username: contact.username
                     }));
+                    
+                    tg.showPopup({
+                        title: 'Пользователь добавлен',
+                        message: `Теперь вы будете отслеживать общение с @${contact.username}`,
+                        buttons: [{type: 'ok'}]
+                    });
                 }
+            }).catch(error => {
+                tg.showPopup({
+                    title: 'Ошибка',
+                    message: 'Не удалось получить доступ к контактам',
+                    buttons: [{type: 'ok'}]
+                });
             });
         }
 
@@ -190,6 +195,11 @@
             const list = document.getElementById('streak-list');
             list.innerHTML = '';
 
+            if (!streaks || streaks.length === 0) {
+                list.innerHTML = '<li class="streak-item">У вас пока нет активных стриков. Добавьте друга, чтобы начать отслеживать общение!</li>';
+                return;
+            }
+
             streaks.forEach(streak => {
                 const item = document.createElement('li');
                 item.className = 'streak-item';
@@ -207,12 +217,20 @@
             });
         }
 
-        // Пример данных для тестирования
-        const testStreaks = [
-            {username: 'friend1', count: 5, last_chat: 'Сегодня'},
-            {username: 'bestie', count: 3, last_chat: 'Вчера'},
-        ];
-        updateStreakList(testStreaks);
+        // Запрашиваем актуальные данные у бота
+        tg.sendData(JSON.stringify({
+            action: 'get_streaks'
+        }));
+
+        // Обработка входящих данных от бота
+        tg.onEvent('mainButtonClicked', function(){
+            tg.sendData(JSON.stringify({
+                action: 'mark_today'
+            }));
+        });
+
+        // Инициализация пустого списка
+        updateStreakList([]);
     </script>
 </body>
 </html> 
