@@ -85,12 +85,12 @@ let currentUserBalance = 0; // Храним баланс локально
 
 const FREEZE_COST_PER_DAY = 1; // Стоимость заморозки (должна совпадать с серверной)
 
-// Определяем базовый URL для API
-const IS_LOCALHOST_DEBUG = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
-const API_BASE_URL = IS_LOCALHOST_DEBUG ? 'http://localhost:8080' : ''; // Если на GitHub Pages, используем относительный путь (предполагая прокси или тот же домен)
-                                                                    // Для локального теста с ботом на localhost:8080, API_BASE_URL должен быть 'http://localhost:8080'
-                                                                    // Если WebApp на GitHub Pages, а бот на localhost, то CORS должен быть настроен
-                                                                    // и здесь должен быть 'http://localhost:8080'
+// Для текущей конфигурации: фронтенд на GitHub Pages, бэкенд локально.
+// Поэтому API_BASE_URL всегда должен указывать на ваш локальный бэкенд.
+// const API_BASE_URL = 'http://localhost:8080'; 
+
+// Используем ngrok URL для доступа к локальному бэкенду через HTTPS
+const API_BASE_URL = 'https://ba78-80-110-47-123.ngrok-free.app';
 
 console.log('script.js: Variables initialized');
 
