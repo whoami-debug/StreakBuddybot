@@ -156,20 +156,43 @@ async function fetchStreaks() {
 }
 
 function createStreakCardHTML(streak) {
-    const safePartnerUsername = streak.partner_username.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+    console.log('Streak data for card:', streak);
+    const safePartnerUsername = streak.partner_username ? streak.partner_username.replace(/'/g, "\\'").replace(/"/g, "&quot;") : '';
     const partnerMention = streak.partner_username ? `@${streak.partner_username}` : `ID: ${streak.partner_id}`;
     const chatLink = streak.partner_username 
         ? `tg://resolve?domain=${streak.partner_username}` 
         : `tg://user?id=${streak.partner_id}`;
+    
+    let freezeInfoHTML = '';
+    if (streak.freeze_end_date) {
+        try {
+            const freezeEndDate = new Date(streak.freeze_end_date);
+            // Проверяем, что дата валидна и что она еще не прошла (или сегодня)
+            // Сравниваем только даты, без времени
+            const today = new Date(); // Сегодняшняя дата (локальное время клиента)
+            today.setHours(0, 0, 0, 0); // Обнуляем время для корректного сравнения с датой из БД (которая тоже без времени)
+            
+            if (!isNaN(freezeEndDate.getTime()) && freezeEndDate >= today) {
+                 freezeInfoHTML = `<div class="freeze-info">❄️ Заморожен до: ${freezeEndDate.toLocaleDateString('ru-RU')}</div>`;
+            } else if (!isNaN(freezeEndDate.getTime()) && freezeEndDate < today) {
+                // Можно добавить логику, если заморозка истекла, но все еще приходит от сервера
+                // Например, если get_active_freeze на сервере не удаляет старые записи сразу
+                console.log('script.js: Streak with', streak.partner_username, 'had an expired freeze until', streak.freeze_end_date);
+            }
+        } catch (e) {
+            console.error("Error parsing freeze_end_date:", streak.freeze_end_date, e);
+        }
+    }
 
     return (
-        '<div class="streak-card">' +
+        '<div class="streak-card" id="streak-card-' + streak.partner_id + '">' +
             '<div class="streak-info">' +
                 '<div class="user-pair">Вы и ' + partnerMention + '</div>' +
                 '<div class="streak-count">' + streak.streak_count + '🔥</div>' +
             '</div>' +
+            freezeInfoHTML +
             '<div class="streak-actions">' +
-                '<button onclick="markToday(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Продлить стрик</button>' +
+                // '<button onclick="markToday(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Продлить стрик</button>' + // Кнопка удалена
                 '<a href="' + chatLink + '" class="chat-link-button" target="_blank" rel="noopener noreferrer">Написать</a>' +
                 '<button class="freeze-button" onclick="promptFreezeStreak(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Заморозить (❄️)</button>' + // Новая кнопка
             '</div>' +
@@ -191,47 +214,47 @@ function updateStreaksUI(streaks) {
     }
 }
 
-async function markToday(partnerId, partnerUsername) {
-    console.log('script.js: markToday called for partnerId:', partnerId, 'partnerUsername:', partnerUsername, 'currentUserId:', currentUserId);
-    if (!currentUserId) {
-        showFeedback("Ошибка: ID пользователя Telegram не определен.", true);
-        return;
-    }
-    showFeedback('Отмечаем стрик с @' + partnerUsername + '...', false); // Initial feedback
+// async function markToday(partnerId, partnerUsername) { // Функцию пока оставляем, но она не будет вызываться с UI
+//     console.log('script.js: markToday called for partnerId:', partnerId, 'partnerUsername:', partnerUsername, 'currentUserId:', currentUserId);
+//     if (!currentUserId) {
+//         showFeedback("Ошибка: ID пользователя Telegram не определен.", true);
+//         return;
+//     }
+//     showFeedback('Отмечаем стрик с @' + partnerUsername + '...', false); // Initial feedback
 
-    const apiUrlMark = API_BASE_URL + '/api/webapp/mark_today';
-    console.log('script.js: Attempting to POST to:', apiUrlMark, 'with data:', { user_id: currentUserId, partner_id: partnerId });
+//     const apiUrlMark = API_BASE_URL + '/api/webapp/mark_today';
+//     console.log('script.js: Attempting to POST to:', apiUrlMark, 'with data:', { user_id: currentUserId, partner_id: partnerId });
 
-    try {
-        const response = await fetch(apiUrlMark, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'ngrok-skip-browser-warning': 'true'
-            },
-            body: JSON.stringify({ user_id: currentUserId, partner_id: partnerId }),
-        });
-        console.log('script.js: Mark today response received:', response);
-        const result = await response.json();
-        console.log('script.js: Mark today result from server:', result);
+//     try {
+//         const response = await fetch(apiUrlMark, {
+//             method: 'POST',
+//             headers: {
+//                 'Content-Type': 'application/json',
+//                 'ngrok-skip-browser-warning': 'true' // Добавляем заголовок для ngrok
+//             },
+//             body: JSON.stringify({ user_id: currentUserId, partner_id: partnerId }),
+//         });
+//         console.log('script.js: Mark today response received:', response);
+//         const result = await response.json();
+//         console.log('script.js: Mark today result from server:', result);
 
-        if (!response.ok) {
-            console.error('script.js: Mark today error - Response not OK. Status:', response.status, 'Result data:', result);
-            throw new Error(result.error || 'Ошибка ' + response.status + ' от сервера');
-        }
+//         if (!response.ok) {
+//             console.error('script.js: Mark today error - Response not OK. Status:', response.status, 'Result data:', result);
+//             throw new Error(result.error || 'Ошибка ' + response.status + ' от сервера');
+//         }
         
-        showFeedback(result.message || "Действие выполнено.", !result.streak_updated && !result.message.toLowerCase().includes("уже") && !result.message.toLowerCase().includes("сохранена"));
+//         showFeedback(result.message || "Действие выполнено.", !result.streak_updated && !result.message.toLowerCase().includes("уже") && !result.message.toLowerCase().includes("сохранена"));
 
-        const positiveMessages = ["стрик обновлен", "уже подтверждено", "уже было учтено", "ваша отметка сохранена"];
-        if (result.streak_updated || positiveMessages.some(pm => result.message.toLowerCase().includes(pm))) {
-            setTimeout(fetchStreaks, 1000);
-        }
+//         const positiveMessages = ["стрик обновлен", "уже подтверждено", "уже было учтено", "ваша отметка сохранена"];
+//         if (result.streak_updated || positiveMessages.some(pm => result.message.toLowerCase().includes(pm))) {
+//             setTimeout(fetchStreaks, 1000);
+//         }
 
-    } catch (err) {
-        console.error('script.js: Error in markToday catch block:', err);
-         showFeedback('Ошибка с @' + partnerUsername + ': ' + err.message, true);
-    }
-}
+//     } catch (err) {
+//         console.error('script.js: Error in markToday catch block:', err);
+//          showFeedback('Ошибка с @' + partnerUsername + ': ' + err.message, true);
+//     }
+// }
 
 async function promptFreezeStreak(partnerId, partnerUsernameSafe) {
     const partnerUsernameDisplay = partnerUsernameSafe.replace(/&quot;/g, '"').replace(/\\'/g, "'");
@@ -287,18 +310,62 @@ async function promptFreezeStreak(partnerId, partnerUsernameSafe) {
         showFeedback(result.message || "Действие по заморозке выполнено.", !result.success);
 
         if (result.success) {
-            currentUserBalance = result.new_balance !== undefined ? result.new_balance : currentUserBalance - cost; // Обновляем баланс
+            currentUserBalance = result.new_balance !== undefined ? result.new_balance : currentUserBalance - cost; 
              if (userBalanceSpan) {
                 userBalanceSpan.textContent = currentUserBalance;
             }
-            // Можно добавить обновление информации о заморозке на карточке, если сервер ее вернет
-            // Пока просто перезапросим все стрики для обновления (хотя это может быть избыточно, если только баланс изменился)
-            setTimeout(fetchStreaks, 1000); // Обновить список стриков и баланс
+            // Обновляем информацию о заморозке на конкретной карточке или перезагружаем все
+            if (result.new_freeze_end_date) {
+                updateFreezeInfoOnCard(partnerId, result.new_freeze_end_date);
+            } else {
+                // Если дата не пришла, или для простоты, можно просто перезапросить все стрики
+                setTimeout(fetchStreaks, 1000); 
+            }
         }
 
     } catch (err) {
         console.error('script.js: Error in freezeStreak catch block:', err);
          showFeedback('Ошибка при заморозке с @' + partnerUsernameDisplay + ': ' + err.message, true);
+    }
+}
+
+// Новая функция для обновления информации о заморозке на карточке
+function updateFreezeInfoOnCard(partnerId, freezeDateISO) {
+    const cardElement = document.getElementById('streak-card-' + partnerId);
+    if (!cardElement) return;
+
+    let freezeInfoDiv = cardElement.querySelector('.freeze-info');
+    if (!freezeInfoDiv) { // Если элемента нет, создаем его и вставляем перед .streak-actions
+        freezeInfoDiv = document.createElement('div');
+        freezeInfoDiv.className = 'freeze-info';
+        const actionsDiv = cardElement.querySelector('.streak-actions');
+        if (actionsDiv) {
+            cardElement.insertBefore(freezeInfoDiv, actionsDiv);
+        } else { // На всякий случай, если нет .streak-actions, добавляем в конец
+            cardElement.appendChild(freezeInfoDiv);
+        }
+    }
+
+    if (freezeDateISO) {
+        try {
+            const freezeEndDate = new Date(freezeDateISO);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            if (!isNaN(freezeEndDate.getTime()) && freezeEndDate >= today) {
+                freezeInfoDiv.innerHTML = `❄️ Заморожен до: ${freezeEndDate.toLocaleDateString('ru-RU')}`;
+                freezeInfoDiv.style.display = 'block'; // Показываем, если был скрыт
+            } else {
+                freezeInfoDiv.innerHTML = ''; // Стираем, если дата некорректна или прошла
+                freezeInfoDiv.style.display = 'none';
+            }
+        } catch (e) {
+            console.error("Error parsing freeze_end_date for card update:", freezeDateISO, e);
+            freezeInfoDiv.innerHTML = '';
+            freezeInfoDiv.style.display = 'none';
+        }
+    } else { // Если пришел null/undefined, значит заморозки нет
+        freezeInfoDiv.innerHTML = '';
+        freezeInfoDiv.style.display = 'none';
     }
 }
 

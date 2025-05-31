@@ -92,12 +92,24 @@ class Database:
 
     async def add_user(self, user_id: int, username: str):
         async with aiosqlite.connect(self.db_name) as db:
+            # Сначала пытаемся вставить нового пользователя, игнорируя, если он уже существует
             await db.execute(
-                "INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO users (user_id, username, balance) VALUES (?, ?, 0)",
                 (user_id, username)
             )
+            # Затем, если пользователь уже существовал, проверим, не изменился ли его username
+            # и обновим только username, если это необходимо. Баланс не трогаем.
+            # (Это можно сделать более оптимально, но для ясности пока так)
+            async with db.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)) as cursor:
+                result = await cursor.fetchone()
+                if result and result[0] != username:
+                    await db.execute(
+                        "UPDATE users SET username = ? WHERE user_id = ?",
+                        (username, user_id)
+                    )
+                    self.logger.info(f"DB: Updated username for user {user_id} to {username}.")
             await db.commit()
-            # self.logger.info(f"DB: User {username} ({user_id}) added/updated.") # Может быть слишком много логов
+            # self.logger.info(f"DB: User {username} ({user_id}) ensured in DB.")
 
     async def get_user_id_by_username(self, username: str) -> Optional[int]:
         async with aiosqlite.connect(self.db_name) as db:
@@ -309,13 +321,14 @@ class Database:
             self.logger.error(f"DB: Error in get_streak_count for {user_id}-{partner_id}: {e}", exc_info=True)
             return 0
 
-    async def get_user_streaks(self, current_user_id: int, current_chat_id: int) -> List[Tuple[int, str, int]]:
+    async def get_user_streaks(self, current_user_id: int, current_chat_id: int) -> List[Tuple[int, str, int, Optional[str]]]:
         """Получение списка стриков пользователя.
-        Возвращает список кортежей (partner_id, partner_username, streak_count).
+        Возвращает список кортежей (partner_id, partner_username, streak_count, freeze_end_date_iso_or_none).
         Если current_chat_id это ID группы, то фильтрует стрики по активности в этой группе.
         """
-        streaks_to_show: List[Tuple[int, str, int]] = []
+        streaks_to_show: List[Tuple[int, str, int, Optional[str]]] = []
         try:
+            today = datetime.now(timezone.utc).date() # Нужна текущая дата для get_active_freeze
             async with aiosqlite.connect(self.db_name) as db:
                 # 1. Получаем все глобальные стрики пользователя
                 async with db.execute("""
@@ -325,9 +338,14 @@ class Database:
                     WHERE sp.user_id = ? AND sp.streak_count > 0 
                     ORDER BY sp.streak_count DESC
                 """, (current_user_id,)) as cursor:
-                    all_global_streaks = await cursor.fetchall()
+                    all_global_streaks_raw = await cursor.fetchall()
                 
-                self.logger.info(f"DB: get_user_streaks - Found {len(all_global_streaks)} global streaks for user {current_user_id}.")
+                all_global_streaks: List[Tuple[int, str, int, Optional[str]]] = []
+                for pid, puname, scount in all_global_streaks_raw:
+                    freeze_end_date = await self.get_active_freeze(current_user_id, pid, today)
+                    all_global_streaks.append((pid, puname, scount, freeze_end_date.isoformat() if freeze_end_date else None))
+
+                self.logger.info(f"DB: get_user_streaks - Found {len(all_global_streaks)} global streaks (with freeze info) for user {current_user_id}.")
 
                 # 2. Фильтруем в зависимости от типа чата
                 # Если current_chat_id == current_user_id, это сигнал, что запрос из ЛС/webapp (показываем все)
@@ -336,11 +354,10 @@ class Database:
 
                 if not is_group_context:
                     self.logger.info(f"DB: get_user_streaks - Private context (chat_id={current_chat_id}), showing all global streaks.")
-                    for partner_id, partner_username, streak_count in all_global_streaks:
-                        streaks_to_show.append((partner_id, partner_username, streak_count))
+                    streaks_to_show = all_global_streaks
                 else:
                     self.logger.info(f"DB: get_user_streaks - Group context (chat_id={current_chat_id}), filtering streaks.")
-                    for partner_id, partner_username, streak_count in all_global_streaks:
+                    for partner_id, partner_username, streak_count, freeze_date_iso in all_global_streaks:
                         # Проверяем, было ли взаимодействие current_user_id с partner_id в current_chat_id
                         async with db.execute("""
                             SELECT 1 FROM messages 
@@ -352,7 +369,7 @@ class Database:
                         
                         if interaction_in_this_chat:
                             self.logger.info(f"DB: get_user_streaks - Streak with {partner_username} ({partner_id}) IS relevant to group {current_chat_id}.")
-                            streaks_to_show.append((partner_id, partner_username, streak_count))
+                            streaks_to_show.append((partner_id, partner_username, streak_count, freeze_date_iso))
                         else:
                             self.logger.info(f"DB: get_user_streaks - Streak with {partner_username} ({partner_id}) NOT relevant to group {current_chat_id} (no messages).")
             

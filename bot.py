@@ -84,7 +84,7 @@ async def get_webapp_user_streaks(request):
             return web.json_response({'error': 'Invalid user_id format'}, status=400)
 
         logger.info(f"/api/webapp/user_streaks: Calling db.get_user_streaks with user_id={user_id}, chat_id={user_id}")
-        streaks_data = await db.get_user_streaks(user_id, user_id) # chat_id=user_id для получения всех стриков пользователя
+        streaks_data = await db.get_user_streaks(user_id, user_id)
         logger.info(f"/api/webapp/user_streaks: Received streaks_data from DB: {streaks_data}")
         
         user_balance = await db.get_user_balance(user_id)
@@ -92,8 +92,13 @@ async def get_webapp_user_streaks(request):
 
         formatted_streaks = []
         if streaks_data:
-            for pid, puname, scount in streaks_data:
-                formatted_streaks.append({'partner_id': pid, 'partner_username': puname, 'streak_count': scount})
+            for pid, puname, scount, freeze_date_iso in streaks_data:
+                formatted_streaks.append({
+                    'partner_id': pid,
+                    'partner_username': puname,
+                    'streak_count': scount,
+                    'freeze_end_date': freeze_date_iso
+                })
         
         logger.info(f"/api/webapp/user_streaks: Responding with formatted_streaks and balance.")
         return web.json_response({'streaks': formatted_streaks, 'balance': user_balance})
@@ -162,46 +167,58 @@ async def post_webapp_freeze_streak(request):
             return web.json_response({
                 'success': False, 
                 'message': f'Недостаточно баллов. Нужно: {cost}, у вас: {user_balance}',
-                'error': 'insufficient_balance' 
+                'error': 'insufficient_balance',
+                'new_freeze_end_date': None
             }, status=200) 
 
         today = datetime.now(timezone.utc).date()
-        new_freeze_end_date = today + timedelta(days=days_to_freeze)
-        
         current_freeze_end_date = await db.get_active_freeze(user_id, partner_id, today)
-        if current_freeze_end_date and current_freeze_end_date >= new_freeze_end_date:
-            logger.info(f"/api/webapp/freeze_streak: Existing longer freeze for {user_id}-{partner_id} until {current_freeze_end_date}.")
-            return web.json_response({
-                'success': False, 
-                'message': f'У вас уже активна заморозка с этим пользователем до {current_freeze_end_date.strftime("%d.%m.%Y")}, что дольше или равно запрошенному.',
-                'error': 'existing_longer_freeze'
-            }, status=200)
+        
+        if current_freeze_end_date:
+            start_date_for_new_freeze = current_freeze_end_date
+            logger.info(f"/api/webapp/freeze_streak: Extending existing freeze from {current_freeze_end_date} by {days_to_freeze} days.")
+        else:
+            start_date_for_new_freeze = today
+            logger.info(f"/api/webapp/freeze_streak: Starting new freeze from {today} for {days_to_freeze} days.")
+        
+        final_freeze_end_date = start_date_for_new_freeze + timedelta(days=days_to_freeze)
+
+        # Небольшая подстраховка, чтобы не уйти слишком далеко в будущее или прошлое при суммировании
+        # Хотя проверка на 30 дней уже есть для days_to_freeze
+        if (final_freeze_end_date - today).days > 60: # Ограничим суммарную заморозку, например, 60 днями от сегодня
+             logger.warning(f"/api/webapp/freeze_streak: Total freeze duration for {user_id}-{partner_id} would exceed 60 days. Capping.")
+             # Можно вернуть ошибку или просто ограничить
+             return web.json_response({
+                'success': False,
+                'message': 'Общая длительность заморозки не может превышать 60 дней от текущей даты.',
+                'error': 'freeze_duration_too_long',
+                'new_freeze_end_date': None 
+             }, status=200)
 
         if await db.update_user_balance(user_id, -cost): 
-            if await db.add_streak_freeze(user_id, partner_id, new_freeze_end_date):
+            if await db.add_streak_freeze(user_id, partner_id, final_freeze_end_date):
                 new_balance = await db.get_user_balance(user_id)
-                logger.info(f"/api/webapp/freeze_streak: Streak for {user_id}-{partner_id} frozen until {new_freeze_end_date}. Cost: {cost}. New balance: {new_balance}")
+                logger.info(f"/api/webapp/freeze_streak: Streak for {user_id}-{partner_id} frozen until {final_freeze_end_date}. Cost: {cost}. New balance: {new_balance}")
                 try:
-                    # Имена пользователей для уведомления могут быть None, если пользователь удален или не имеет username
                     user_username_obj = await db.get_username_by_id(user_id)
                     user_username_for_notification = f"@{user_username_obj}" if user_username_obj else f"Пользователь ID {user_id}"
-
-                    await bot.send_message(partner_id, f"ℹ️ {user_username_for_notification} заморозил ваш общий стрик до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
+                    await bot.send_message(partner_id, f"ℹ️ {user_username_for_notification} продлил/установил заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}.")
                 except Exception as e:
                     logger.warning(f"/api/webapp/freeze_streak: Failed to send freeze notification to partner {partner_id}: {e}")
                 
                 return web.json_response({
                     'success': True, 
-                    'message': f'Стрик успешно заморожен до {new_freeze_end_date.strftime("%d.%m.%Y")}!', 
-                    'new_balance': new_balance
+                    'message': f'Стрик успешно заморожен до {final_freeze_end_date.strftime("%d.%m.%Y")}!', 
+                    'new_balance': new_balance,
+                    'new_freeze_end_date': final_freeze_end_date.isoformat()
                 })
             else:
                 await db.update_user_balance(user_id, cost) 
                 logger.error(f"/api/webapp/freeze_streak: Failed to add streak freeze for {user_id}-{partner_id} after deducting balance.")
-                return web.json_response({'success': False, 'message': 'Не удалось активировать заморозку в базе. Баллы возвращены.', 'error': 'db_freeze_add_failed'}, status=200)
+                return web.json_response({'success': False, 'message': 'Не удалось активировать заморозку в базе. Баллы возвращены.', 'error': 'db_freeze_add_failed', 'new_freeze_end_date': None}, status=200)
         else:
             logger.error(f"/api/webapp/freeze_streak: Failed to update balance for user {user_id} for freeze cost {cost}.")
-            return web.json_response({'success': False, 'message': 'Ошибка при списании баллов.', 'error': 'balance_deduction_failed'}, status=200)
+            return web.json_response({'success': False, 'message': 'Ошибка при списании баллов.', 'error': 'balance_deduction_failed', 'new_freeze_end_date': None}, status=200)
 
     except json.JSONDecodeError:
         logger.error("/api/webapp/freeze_streak: Invalid JSON payload.")
@@ -977,10 +994,10 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
     await reset_daily_caches_if_new_day()
     user_id = message.from_user.id
     
-    FREEZE_COST_PER_DAY = 1 # 1 балл за 1 день заморозки (можно вынести в config.py)
+    FREEZE_COST_PER_DAY = 1
 
     if not command.args:
-        await message.answer(f"⚠️ Использование: /freezestreak @username <количество_дней>\nСтоимость: {FREEZE_COST_PER_DAY} балл(а) за 1 день заморозки.")
+        await message.answer(f"⚠️ Использование: /freezestreak @username <количество_дней>\\nСтоимость: {FREEZE_COST_PER_DAY} балл(а) за 1 день заморозки.")
         return
 
     args = command.args.split()
@@ -996,8 +1013,8 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
         if days_to_freeze <= 0:
             await message.answer("❌ Количество дней для заморозки должно быть положительным числом.")
             return
-        if days_to_freeze > 30: # Ограничение, чтобы не замораживали на слишком долгий срок
-             await message.answer("❌ Максимальное количество дней для заморозки: 30.")
+        if days_to_freeze > 30: # Ограничение на одну операцию
+             await message.answer("❌ Максимальное количество дней для одной операции заморозки: 30.")
              return
     except ValueError:
         await message.answer("❌ Неверный формат количества дней.")
@@ -1012,53 +1029,39 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
         await message.answer("❌ Вы не можете заморозить стрик с самим собой.")
         return
 
-    # Проверяем, есть ли вообще стрик с этим пользователем (даже если он 0)
-    # Для этого нужно, чтобы пара была в streak_pairs
-    # get_streak_count вернет 0 если пары нет или стрик 0. Нам нужно убедиться, что пара существует.
-    # Простой способ - попытаться получить streak_count. Если есть пара, он не вызовет ошибку.
-    # Или лучше иметь отдельную функцию db.check_streak_pair_exists(user_id, partner_id)
-    # Пока воспользуемся существующей логикой: если add_streak_pair не вызывалась, стрика нет.
-    # Но для заморозки лучше, чтобы стрик уже был как-то инициирован (через /chat)
-    
-    # Убедимся, что пользователи являются парой (хотя бы формально)
-    # Это должно было произойти через /chat, но на всякий случай
-    await db.add_streak_pair(user_id, partner_id) # Создаст, если нет. Не логирует, если уже есть.
-
-    current_streak_count = await db.get_streak_count(user_id, partner_id)
-    # Не важно, какой current_streak_count, заморозить можно и нулевой стрик, чтобы он не сбросился (если был сброшен только что)
-    # или чтобы предотвратить сброс активного.
+    await db.add_streak_pair(user_id, partner_id) 
 
     cost = days_to_freeze * FREEZE_COST_PER_DAY
     user_balance = await db.get_user_balance(user_id)
 
     if user_balance < cost:
-        await message.answer(f"⚠️ Недостаточно баллов для заморозки.\nТребуется: {cost} (за {days_to_freeze} дн.), у вас: {user_balance}.\nПополните баланс или выберите меньший срок.")
+        await message.answer(f"⚠️ Недостаточно баллов для заморозки.\\nТребуется: {cost} (за {days_to_freeze} дн.), у вас: {user_balance}.\\nПополните баланс или выберите меньший срок.")
         return
 
-    # Проверяем, нет ли уже активной заморозки, которая заканчивается позже
     today = datetime.now(timezone.utc).date()
     current_freeze_end_date = await db.get_active_freeze(user_id, partner_id, today)
     
-    new_freeze_end_date = today + timedelta(days=days_to_freeze)
+    if current_freeze_end_date:
+        start_date_for_new_freeze = current_freeze_end_date
+        info_msg = f"ℹ️ У вас уже активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}. Она будет продлена."
+    else:
+        start_date_for_new_freeze = today
+        info_msg = f"❄️ Активируем новую заморозку с @{target_username}."
+        
+    final_freeze_end_date = start_date_for_new_freeze + timedelta(days=days_to_freeze)
 
-    if current_freeze_end_date and current_freeze_end_date >= new_freeze_end_date:
-        await message.answer(f"ℹ️ У вас уже активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}, что дольше или равно запрошенному сроку. Новая заморозка не требуется.")
+    if (final_freeze_end_date - today).days > 60: 
+        await message.answer(f"⚠️ Общая длительность заморозки с @{target_username} не может превышать 60 дней от текущей даты. Текущий запрос на {days_to_freeze} дн. не выполнен.")
         return
-    
-    if current_freeze_end_date and current_freeze_end_date < new_freeze_end_date:
-         await message.answer(f"ℹ️ У вас была активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}. Она будет продлена до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
 
-
-    if await db.update_user_balance(user_id, -cost): # Списываем баллы
-        if await db.add_streak_freeze(user_id, partner_id, new_freeze_end_date):
-            await message.answer(f"❄️ Стрик с @{target_username} успешно заморожен до {new_freeze_end_date.strftime('%d.%m.%Y')}!\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
-            # Уведомление партнеру (опционально)
+    if await db.update_user_balance(user_id, -cost): 
+        if await db.add_streak_freeze(user_id, partner_id, final_freeze_end_date):
+            await message.answer(f"{info_msg}\\nСтрик с @{target_username} успешно заморожен до {final_freeze_end_date.strftime('%d.%m.%Y')}!\\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
             try:
-                await bot.send_message(partner_id, f"ℹ️ Пользователь @{message.from_user.username} заморозил ваш общий стрик до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
+                await bot.send_message(partner_id, f"ℹ️ Пользователь @{message.from_user.username} продлил/установил заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}.")
             except Exception as e:
                 logger.warning(f"Не удалось отправить уведомление о заморозке партнеру {partner_id}: {e}")
         else:
-            # Возвращаем баллы, если заморозка не удалась
             await db.update_user_balance(user_id, cost) 
             await message.answer("❌ Не удалось активировать заморозку. Баллы не списаны. Попробуйте позже.")
     else:
