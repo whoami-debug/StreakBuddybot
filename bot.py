@@ -64,26 +64,33 @@ async def serve_webapp(request):
 async def get_webapp_user_streaks(request):
     try:
         user_id_str = request.query.get('user_id')
+        logger.info(f"/api/webapp/user_streaks: Received user_id_str: {user_id_str}")
         if not user_id_str:
+            logger.warning("/api/webapp/user_streaks: user_id_str is missing")
             return web.json_response({'error': 'user_id is required'}, status=400)
         
         try:
             user_id = int(user_id_str)
+            logger.info(f"/api/webapp/user_streaks: Parsed user_id: {user_id} (type: {type(user_id)})")
         except ValueError:
+            logger.error(f"/api/webapp/user_streaks: Invalid user_id format: {user_id_str}", exc_info=True)
             return web.json_response({'error': 'Invalid user_id format'}, status=400)
 
-        # Для WebApp всегда запрашиваем все стрики пользователя, передавая user_id как chat_id
-        streaks_data = await db.get_user_streaks(user_id, user_id) 
+        logger.info(f"/api/webapp/user_streaks: Calling db.get_user_streaks with user_id={user_id}, chat_id={user_id}")
+        streaks_data = await db.get_user_streaks(user_id, user_id)
+        logger.info(f"/api/webapp/user_streaks: Received streaks_data from DB: {streaks_data}")
         
-        formatted_streaks = [
-            {'partner_id': pid, 'partner_username': puname, 'streak_count': scount}
-            for pid, puname, scount in streaks_data
-        ]
+        formatted_streaks = []
+        if streaks_data:
+            for pid, puname, scount in streaks_data:
+                formatted_streaks.append({'partner_id': pid, 'partner_username': puname, 'streak_count': scount})
         
+        logger.info(f"/api/webapp/user_streaks: Responding with formatted_streaks: {formatted_streaks}")
         return web.json_response({'streaks': formatted_streaks})
     except Exception as e:
         logger.error(f"Error in /api/webapp/user_streaks: {e}", exc_info=True)
-        return web.json_response({'error': f'Internal server error: {str(e)}'}, status=500)
+        # В случае любой ошибки, возвращаем более явное сообщение об ошибке, которое клиент сможет показать
+        return web.json_response({'error': f'Internal server error occurred. Details: {str(e)}'}, status=500)
 
 # Новый эндпоинт для ручной отметки через WebApp
 @routes.post('/api/webapp/mark_today')
@@ -752,9 +759,9 @@ async def cmd_streaks(message: Message, command: Optional[CommandObject] = None)
 
         response_lines = []
         # Сортируем стрики по убыванию перед отображением
-        sorted_streaks = sorted(streaks, key=lambda x: x[1], reverse=True)
+        sorted_streaks = sorted(streaks, key=lambda x: x[2], reverse=True)
 
-        for partner_username, streak_count in sorted_streaks:
+        for partner_id, partner_username, streak_count in sorted_streaks:
             days_word = get_days_word(streak_count)
             # partner_mention = f"@{partner_username}" if partner_username and not partner_username.startswith('@') else partner_username
             # Более надежное формирование упоминания:
@@ -777,9 +784,9 @@ async def cmd_streaks(message: Message, command: Optional[CommandObject] = None)
         
         # Добавляем мотивационное сообщение
         # Проверяем оригинальный список streaks, а не sorted_streaks, для эффективности
-        if any(s[1] >= 7 for s in streaks):
+        if any(s[2] >= 7 for s in streaks):
             response_text += "\n\n🎉 <b>Отличная работа! Продолжайте общаться!</b>"
-        elif any(s[1] >= 3 for s in streaks):
+        elif any(s[2] >= 3 for s in streaks):
             response_text += "\n\n💫 <b>Хороший старт! Не пропускайте дни!</b>"
         elif streaks: # Если список streaks не пустой, но нет тех, кто >= 3
             response_text += "\n\n💪 <b>Начало положено! Общайтесь каждый день!</b>"
