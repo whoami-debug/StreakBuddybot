@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streak Tracker</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 16px;
+            color: var(--tg-theme-text-color, #000);
+            background: var(--tg-theme-bg-color, #fff);
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .button {
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #fff);
+            border: none;
+            border-radius: 8px;
+            padding: 12px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+
+        .button:active {
+            opacity: 0.8;
+        }
+
+        .streak-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .streak-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--tg-theme-hint-color, #ccc);
+        }
+
+        .streak-item:last-child {
+            border-bottom: none;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: var(--tg-theme-button-color, #2481cc);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+
+        .streak-count {
+            font-weight: bold;
+            color: var(--tg-theme-button-color, #2481cc);
+        }
+
+        .tab-bar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 8px;
+            text-align: center;
+            background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .tab.active {
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #fff);
+        }
+
+        .section {
+            display: none;
+        }
+
+        .section.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="tab-bar">
+            <div class="tab active" onclick="switchTab('streaks')">Мои стрики</div>
+            <div class="tab" onclick="switchTab('add')">Добавить друга</div>
+        </div>
+
+        <div id="streaks-section" class="section active">
+            <div class="card">
+                <h3>Активные стрики</h3>
+                <ul class="streak-list" id="streak-list">
+                    <!-- Список будет заполнен динамически -->
+                </ul>
+            </div>
+            <button class="button" onclick="markToday()">Отметить общение сегодня ✓</button>
+        </div>
+
+        <div id="add-section" class="section">
+            <div class="card">
+                <h3>Добавить друга для отслеживания</h3>
+                <p>Выберите пользователя из вашего списка контактов:</p>
+                <button class="button" onclick="selectUser()">Выбрать пользователя</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.ready();
+
+        // Переключение вкладок
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.section').forEach(section => section.classList.remove('active'));
+            
+            document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+            document.getElementById(`${tabName}-section`).classList.add('active');
+        }
+
+        // Выбор пользователя
+        function selectUser() {
+            tg.showPopup({
+                title: 'Выберите пользователя',
+                message: 'С кем вы хотите отслеживать общение?',
+                buttons: [
+                    {id: "select", type: "default", text: "Выбрать из контактов"},
+                    {id: "cancel", type: "cancel", text: "Отмена"}
+                ]
+            }, function(buttonId) {
+                if (buttonId === 'select') {
+                    // Здесь будет интеграция с ботом для выбора пользователя
+                    tg.sendData(JSON.stringify({
+                        action: 'select_user'
+                    }));
+                }
+            });
+        }
+
+        // Отметить общение за сегодня
+        function markToday() {
+            tg.sendData(JSON.stringify({
+                action: 'mark_today'
+            }));
+            
+            // Показываем уведомление
+            tg.showPopup({
+                title: 'Готово!',
+                message: 'Общение за сегодня отмечено',
+                buttons: [{type: 'ok'}]
+            });
+        }
+
+        // Обновление списка стриков
+        function updateStreakList(streaks) {
+            const list = document.getElementById('streak-list');
+            list.innerHTML = '';
+
+            streaks.forEach(streak => {
+                const item = document.createElement('li');
+                item.className = 'streak-item';
+                item.innerHTML = `
+                    <div class="user-info">
+                        <div class="avatar">${streak.username[0].toUpperCase()}</div>
+                        <div>
+                            <div>@${streak.username}</div>
+                            <small>${streak.last_chat}</small>
+                        </div>
+                    </div>
+                    <div class="streak-count">${streak.count} дней</div>
+                `;
+                list.appendChild(item);
+            });
+        }
+
+        // Пример данных для тестирования
+        const testStreaks = [
+            {username: 'friend1', count: 5, last_chat: 'Сегодня'},
+            {username: 'bestie', count: 3, last_chat: 'Вчера'},
+        ];
+        updateStreakList(testStreaks);
+    </script>
+</body>
+</html> 
