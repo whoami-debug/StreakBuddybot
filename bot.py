@@ -176,49 +176,38 @@ async def post_webapp_freeze_streak(request):
         
         if current_freeze_end_date:
             start_date_for_new_freeze = current_freeze_end_date
-            logger.info(f"/api/webapp/freeze_streak: Extending existing freeze from {current_freeze_end_date} by {days_to_freeze} days.")
         else:
             start_date_for_new_freeze = today
-            logger.info(f"/api/webapp/freeze_streak: Starting new freeze from {today} for {days_to_freeze} days.")
         
         final_freeze_end_date = start_date_for_new_freeze + timedelta(days=days_to_freeze)
 
-        # Небольшая подстраховка, чтобы не уйти слишком далеко в будущее или прошлое при суммировании
-        # Хотя проверка на 30 дней уже есть для days_to_freeze
-        if (final_freeze_end_date - today).days > 60: # Ограничим суммарную заморозку, например, 60 днями от сегодня
-             logger.warning(f"/api/webapp/freeze_streak: Total freeze duration for {user_id}-{partner_id} would exceed 60 days. Capping.")
-             # Можно вернуть ошибку или просто ограничить
-             return web.json_response({
-                'success': False,
-                'message': 'Общая длительность заморозки не может превышать 60 дней от текущей даты.',
-                'error': 'freeze_duration_too_long',
-                'new_freeze_end_date': None 
-             }, status=200)
+        # Ограничение на общую длительность заморозки, например, 60 дней от сегодня
+        if (final_freeze_end_date - today).days > 60: 
+            await message.answer(f"⚠️ Общая длительность заморозки с @{target_username} не может превышать 60 дней от текущей даты. Текущий запрос на {days_to_freeze} дн. не выполнен.")
+            return
 
         if await db.update_user_balance(user_id, -cost): 
             if await db.add_streak_freeze(user_id, partner_id, final_freeze_end_date):
-                new_balance = await db.get_user_balance(user_id)
-                logger.info(f"/api/webapp/freeze_streak: Streak for {user_id}-{partner_id} frozen until {final_freeze_end_date}. Cost: {cost}. New balance: {new_balance}")
-                try:
-                    user_username_obj = await db.get_username_by_id(user_id)
-                    user_username_for_notification = f"@{user_username_obj}" if user_username_obj else f"Пользователь ID {user_id}"
-                    await bot.send_message(partner_id, f"ℹ️ {user_username_for_notification} продлил/установил заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}.")
-                except Exception as e:
-                    logger.warning(f"/api/webapp/freeze_streak: Failed to send freeze notification to partner {partner_id}: {e}")
+                # Формируем основное сообщение для пользователя
+                if current_freeze_end_date:
+                    response_message_start = f"❄️ Заморозка с @{target_username} продлена до {final_freeze_end_date.strftime('%d.%m.%Y')}!"
+                else:
+                    response_message_start = f"❄️ Стрик с @{target_username} успешно заморожен до {final_freeze_end_date.strftime('%d.%m.%Y')}!"
                 
-                return web.json_response({
-                    'success': True, 
-                    'message': f'Стрик успешно заморожен до {final_freeze_end_date.strftime("%d.%m.%Y")}!', 
-                    'new_balance': new_balance,
-                    'new_freeze_end_date': final_freeze_end_date.isoformat()
-                })
+                await message.answer(f"{response_message_start}\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
+                
+                # Формируем уведомление для партнера
+                try:
+                    partner_notification_action = 'продлил' if current_freeze_end_date else 'установил'
+                    partner_notification_message = f"ℹ️ Пользователь @{message.from_user.username} {partner_notification_action} заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}."
+                    await bot.send_message(partner_id, partner_notification_message)
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить уведомление о заморозке партнеру {partner_id}: {e}")
             else:
                 await db.update_user_balance(user_id, cost) 
-                logger.error(f"/api/webapp/freeze_streak: Failed to add streak freeze for {user_id}-{partner_id} after deducting balance.")
-                return web.json_response({'success': False, 'message': 'Не удалось активировать заморозку в базе. Баллы возвращены.', 'error': 'db_freeze_add_failed', 'new_freeze_end_date': None}, status=200)
+                await message.answer("❌ Не удалось активировать заморозку. Баллы не списаны. Попробуйте позже.")
         else:
-            logger.error(f"/api/webapp/freeze_streak: Failed to update balance for user {user_id} for freeze cost {cost}.")
-            return web.json_response({'success': False, 'message': 'Ошибка при списании баллов.', 'error': 'balance_deduction_failed', 'new_freeze_end_date': None}, status=200)
+            await message.answer("❌ Ошибка при списании баллов. Заморозка не активирована.")
 
     except json.JSONDecodeError:
         logger.error("/api/webapp/freeze_streak: Invalid JSON payload.")
@@ -790,6 +779,16 @@ async def cmd_help(message: Message, command: Optional[CommandObject] = None):
         "💰 <b>Баллы и Заморозка:</b>",
         f"/mybalance - Показать ваш баланс баллов",
         f"/freezestreak @username <кол-во дней> - Заморозить стрик (стоимость: {FREEZE_COST_PER_DAY} балл(а) за день)\\n",
+    ]
+
+    if message.from_user.id == BOT_OWNER_ID:
+        help_text_private_lines.extend([
+            "👑 <b>Команды владельца:</b>",
+            "/addbalance <id|@user> <кол-во> - Изменить баланс пользователя",
+            "/getbalance <id|@user> - Узнать баланс пользователя\\n",
+        ])
+
+    help_text_private_lines.extend([
         "📊 <b>Как работают стрики:</b>",
         "• День засчитывается при общении обоих собеседников",
         "• Пропуск дня сбрасывает серию",
@@ -805,7 +804,8 @@ async def cmd_help(message: Message, command: Optional[CommandObject] = None):
         "• Красивая статистика в веб-интерфейсе",
         "• Уведомления о новых рекордах",
         "• Возможность сброса стрика при необходимости"
-    ]
+    ])
+
     help_text_private = "\\n".join(help_text_private_lines)
 
     if message.chat.type == ChatType.PRIVATE:
@@ -989,7 +989,6 @@ async def cmd_addbalance(message: Message, command: CommandObject):
     else:
         await message.answer(f"❌ Не удалось обновить баланс для {target_username_display}.")
 
-
 async def cmd_freezestreak(message: Message, command: CommandObject):
     await reset_daily_caches_if_new_day()
     user_id = message.from_user.id
@@ -1041,12 +1040,7 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
     today = datetime.now(timezone.utc).date()
     current_freeze_end_date = await db.get_active_freeze(user_id, partner_id, today)
     
-    if current_freeze_end_date:
-        start_date_for_new_freeze = current_freeze_end_date
-        info_msg = f"ℹ️ У вас уже активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}. Она будет продлена."
-    else:
-        start_date_for_new_freeze = today
-        info_msg = f"❄️ Активируем новую заморозку с @{target_username}."
+    start_date_for_new_freeze = current_freeze_end_date if current_freeze_end_date else today
         
     final_freeze_end_date = start_date_for_new_freeze + timedelta(days=days_to_freeze)
 
@@ -1056,9 +1050,17 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
 
     if await db.update_user_balance(user_id, -cost): 
         if await db.add_streak_freeze(user_id, partner_id, final_freeze_end_date):
-            await message.answer(f"{info_msg}\\nСтрик с @{target_username} успешно заморожен до {final_freeze_end_date.strftime('%d.%m.%Y')}!\\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
+            if current_freeze_end_date:
+                response_message_start = f"❄️ Заморозка с @{target_username} продлена до {final_freeze_end_date.strftime('%d.%m.%Y')}!"
+            else:
+                response_message_start = f"❄️ Стрик с @{target_username} успешно заморожен до {final_freeze_end_date.strftime('%d.%m.%Y')}!"
+            
+            await message.answer(f"{response_message_start}\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
+            
             try:
-                await bot.send_message(partner_id, f"ℹ️ Пользователь @{message.from_user.username} продлил/установил заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}.")
+                partner_notification_action = 'продлил' if current_freeze_end_date else 'установил'
+                partner_notification_message = f"ℹ️ Пользователь @{message.from_user.username} {partner_notification_action} заморозку вашего общего стрика до {final_freeze_end_date.strftime('%d.%m.%Y')}."
+                await bot.send_message(partner_id, partner_notification_message)
             except Exception as e:
                 logger.warning(f"Не удалось отправить уведомление о заморозке партнеру {partner_id}: {e}")
         else:
@@ -1066,6 +1068,50 @@ async def cmd_freezestreak(message: Message, command: CommandObject):
             await message.answer("❌ Не удалось активировать заморозку. Баллы не списаны. Попробуйте позже.")
     else:
         await message.answer("❌ Ошибка при списании баллов. Заморозка не активирована.")
+
+async def cmd_getbalance(message: Message, command: CommandObject):
+    """(Только для админа) Проверяет баланс указанного пользователя."""
+    await reset_daily_caches_if_new_day()
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("⛔ Эту команду может использовать только владелец бота.")
+        return
+
+    if not command.args:
+        await message.answer("⚠️ Использование: /getbalance <user_id или @username>")
+        return
+
+    target_identifier = command.args.strip()
+    target_user_id: Optional[int] = None
+    target_username_display: str = target_identifier
+
+    if target_identifier.startswith('@'):
+        username = target_identifier.strip('@')
+        target_user_id = await db.get_user_id_by_username(username)
+        target_username_display = f"@{username}"
+        if not target_user_id:
+            await message.answer(f"❌ Пользователь @{username} не найден в базе.")
+            return
+    else:
+        try:
+            target_user_id = int(target_identifier)
+            # Попробуем получить username для более красивого ответа
+            fetched_username = await db.get_username_by_id(target_user_id)
+            if fetched_username:
+                target_username_display = f"@{fetched_username} (ID: {target_user_id})"
+            # Если юзернейма нет, но ID валидный, все равно работаем, если он есть в базе
+            elif not await db.get_username_by_id(target_user_id): # Проверяем, существует ли пользователь с таким ID
+                 await message.answer(f"❌ Пользователь с ID {target_user_id} не найден в базе.")
+                 return
+        except ValueError:
+            await message.answer("❌ Неверный формат user_id. Укажите ID числом или @username.")
+            return
+    
+    if target_user_id is None: # На всякий случай, если что-то пошло не так с username
+        await message.answer(f"❌ Не удалось определить пользователя {target_identifier}.")
+        return
+
+    balance = await db.get_user_balance(target_user_id)
+    await message.answer(f"💰 Баланс пользователя {target_username_display}: {balance} балл(ов).")
 
 async def main():
     """Главная функция запуска бота"""
@@ -1093,6 +1139,7 @@ async def main():
     dp.message.register(cmd_mybalance, Command("mybalance"))
     dp.message.register(cmd_addbalance, Command("addbalance"))
     dp.message.register(cmd_freezestreak, Command("freezestreak"))
+    dp.message.register(cmd_getbalance, Command("getbalance")) # Регистрируем новую команду
 
     # Хендлер для данных из WebApp
     dp.message.register(handle_webapp_data, lambda message: message.web_app_data is not None)
