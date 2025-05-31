@@ -12,12 +12,13 @@ from aiogram.types import Message, WebAppInfo, InlineKeyboardButton, InlineKeybo
 from aiohttp import web
 
 from database import Database
+from config import BOT_TOKEN, WEBAPP_URL
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота и диспетчера
-bot = Bot(token="8144585782:AAEr6QmDeWXr2ugmZ-gGD0c2icaGWCMZ6o8")
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
@@ -78,7 +79,7 @@ async def cmd_start(message: Message):
     # Создаем кнопку для открытия веб-приложения
     webapp_button = InlineKeyboardButton(
         text="📱 Открыть удобный интерфейс",
-        web_app=WebAppInfo(url="https://your-domain.com/")  # Замените на ваш домен
+        web_app=WebAppInfo(url=WEBAPP_URL)
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[webapp_button]])
     
@@ -109,7 +110,7 @@ async def cmd_webapp(message: Message):
     
     webapp_button = InlineKeyboardButton(
         text="📱 Открыть интерфейс",
-        web_app=WebAppInfo(url="https://your-domain.com/")  # Замените на ваш домен
+        web_app=WebAppInfo(url=WEBAPP_URL)
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[webapp_button]])
     

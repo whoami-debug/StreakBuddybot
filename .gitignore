@@ -35,4 +35,7 @@ ENV/
 *.swo
 
 # Logs
-*.log 
+*.log
+
+# Config
+config.py 
