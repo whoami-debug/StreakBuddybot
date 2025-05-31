@@ -110,6 +110,21 @@
         .section.active {
             display: block;
         }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: var(--tg-theme-hint-color, #999);
+        }
+
+        .error {
+            color: #ff3b30;
+            text-align: center;
+            padding: 12px;
+            margin-bottom: 16px;
+            background: rgba(255, 59, 48, 0.1);
+            border-radius: 8px;
+        }
     </style>
 </head>
 <body>
@@ -122,9 +137,9 @@
         <div id="streaks-section" class="section active">
             <div class="card">
                 <h3>Активные стрики</h3>
-                <ul class="streak-list" id="streak-list">
-                    <!-- Список будет заполнен динамически -->
-                </ul>
+                <div id="streak-list-container">
+                    <div class="loading">Загрузка...</div>
+                </div>
             </div>
             <button class="button" onclick="markToday()">Отметить общение сегодня ✓</button>
         </div>
@@ -150,6 +165,10 @@
             
             document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
             document.getElementById(`${tabName}-section`).classList.add('active');
+
+            if (tabName === 'streaks') {
+                loadStreaks();
+            }
         }
 
         // Выбор пользователя
@@ -160,19 +179,9 @@
                         action: 'select_user',
                         username: contact.username
                     }));
-                    
-                    tg.showPopup({
-                        title: 'Пользователь добавлен',
-                        message: `Теперь вы будете отслеживать общение с @${contact.username}`,
-                        buttons: [{type: 'ok'}]
-                    });
                 }
             }).catch(error => {
-                tg.showPopup({
-                    title: 'Ошибка',
-                    message: 'Не удалось получить доступ к контактам',
-                    buttons: [{type: 'ok'}]
-                });
+                showError('Не удалось получить доступ к контактам');
             });
         }
 
@@ -182,23 +191,51 @@
                 action: 'mark_today'
             }));
             
-            // Показываем уведомление
-            tg.showPopup({
-                title: 'Готово!',
-                message: 'Общение за сегодня отмечено',
-                buttons: [{type: 'ok'}]
+            // Перезагружаем список через 1 секунду
+            setTimeout(loadStreaks, 1000);
+        }
+
+        // Загрузка списка стриков
+        function loadStreaks() {
+            const container = document.getElementById('streak-list-container');
+            container.innerHTML = '<div class="loading">Загрузка...</div>';
+
+            tg.sendData(JSON.stringify({
+                action: 'get_streaks'
+            }));
+
+            // WebApp не поддерживает получение ответа от бота напрямую,
+            // поэтому мы будем получать данные через MainButton
+            tg.MainButton.setText('Получить стрики');
+            tg.MainButton.show();
+            tg.MainButton.onClick(() => {
+                tg.sendData(JSON.stringify({
+                    action: 'get_streaks'
+                }));
             });
+        }
+
+        // Показать ошибку
+        function showError(message) {
+            const container = document.getElementById('streak-list-container');
+            container.innerHTML = `<div class="error">${message}</div>`;
         }
 
         // Обновление списка стриков
         function updateStreakList(streaks) {
-            const list = document.getElementById('streak-list');
-            list.innerHTML = '';
-
+            const container = document.getElementById('streak-list-container');
+            
             if (!streaks || streaks.length === 0) {
-                list.innerHTML = '<li class="streak-item">У вас пока нет активных стриков. Добавьте друга, чтобы начать отслеживать общение!</li>';
+                container.innerHTML = `
+                    <div class="streak-item">
+                        У вас пока нет активных стриков. 
+                        Добавьте друга, чтобы начать отслеживать общение!
+                    </div>`;
                 return;
             }
+
+            const list = document.createElement('ul');
+            list.className = 'streak-list';
 
             streaks.forEach(streak => {
                 const item = document.createElement('li');
@@ -215,22 +252,16 @@
                 `;
                 list.appendChild(item);
             });
+
+            container.innerHTML = '';
+            container.appendChild(list);
         }
 
-        // Запрашиваем актуальные данные у бота
-        tg.sendData(JSON.stringify({
-            action: 'get_streaks'
-        }));
-
         // Обработка входящих данных от бота
-        tg.onEvent('mainButtonClicked', function(){
-            tg.sendData(JSON.stringify({
-                action: 'mark_today'
-            }));
-        });
-
-        // Инициализация пустого списка
-        updateStreakList([]);
+        tg.onEvent('viewportChanged', loadStreaks);
+        
+        // Инициализация
+        loadStreaks();
     </script>
 </body>
 </html> 

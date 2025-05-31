@@ -119,6 +119,110 @@ async def cmd_webapp(message: Message):
         reply_markup=keyboard
     )
 
+@dp.message(Command("chat"))
+async def cmd_chat(message: Message, command: CommandObject):
+    """Установка собеседника для отслеживания общения"""
+    if message.chat.type != ChatType.PRIVATE:
+        await message.answer(
+            "⚠️ Эта команда работает только в личных сообщениях с ботом."
+        )
+        return
+
+    if not command.args:
+        await message.answer(
+            "ℹ️ Пожалуйста, укажите username пользователя.\n"
+            "Пример: /chat @username"
+        )
+        return
+
+    user_id = message.from_user.id
+    target_username = command.args.strip('@')
+    
+    # Проверяем, что пользователь не пытается добавить сам себя
+    if message.from_user.username and target_username == message.from_user.username:
+        await message.answer("❌ Вы не можете добавить сами себя.")
+        return
+    
+    # Получаем ID целевого пользователя
+    target_id = await db.get_user_id_by_username(target_username)
+    if not target_id:
+        await message.answer(
+            f"❌ Пользователь @{target_username} еще не использовал бота.\n"
+            "Попросите его сначала запустить бота командой /start"
+        )
+        return
+
+    # Проверяем, есть ли уже запрос на стрик
+    existing_request = await db.get_streak_request(user_id, target_id)
+    if existing_request:
+        await message.answer(
+            f"✋ Вы уже отправили запрос на стрик пользователю @{target_username}.\n"
+            "Ожидайте подтверждения!"
+        )
+        return
+
+    # Добавляем запрос на стрик
+    await db.add_streak_request(user_id, target_id)
+    
+    # Отправляем уведомление целевому пользователю
+    accept_button = InlineKeyboardButton(
+        text="✅ Принять",
+        callback_data=f"accept_streak:{user_id}"
+    )
+    decline_button = InlineKeyboardButton(
+        text="❌ Отклонить",
+        callback_data=f"decline_streak:{user_id}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[accept_button, decline_button]])
+    
+    await bot.send_message(
+        target_id,
+        f"👋 Пользователь @{message.from_user.username} хочет отслеживать общение с вами!\n\n"
+        "Вы можете принять или отклонить запрос:",
+        reply_markup=keyboard
+    )
+    
+    await message.answer(
+        f"✅ Запрос на отслеживание общения отправлен пользователю @{target_username}.\n"
+        "Я сообщу, когда он примет или отклонит запрос!"
+    )
+
+@dp.callback_query(lambda c: c.data.startswith(("accept_streak:", "decline_streak:")))
+async def process_streak_request(callback_query: types.CallbackQuery):
+    """Обработка ответа на запрос стрика"""
+    action, user_id = callback_query.data.split(":")
+    user_id = int(user_id)
+    target_id = callback_query.from_user.id
+    
+    if action == "accept_streak":
+        # Добавляем пользователей друг другу
+        await db.add_streak_pair(user_id, target_id)
+        
+        # Уведомляем обоих пользователей
+        await bot.send_message(
+            user_id,
+            f"🎉 @{callback_query.from_user.username} принял ваш запрос на отслеживание общения!\n"
+            "Теперь вы можете отмечать общение каждый день."
+        )
+        
+        await callback_query.message.edit_text(
+            "✅ Вы приняли запрос на отслеживание общения.\n"
+            f"Теперь вы будете отслеживать общение с @{(await bot.get_chat(user_id)).username}"
+        )
+        
+    else:  # decline_streak
+        await bot.send_message(
+            user_id,
+            f"😔 @{callback_query.from_user.username} отклонил ваш запрос на отслеживание общения."
+        )
+        
+        await callback_query.message.edit_text(
+            "❌ Вы отклонили запрос на отслеживание общения."
+        )
+    
+    # Удаляем запрос
+    await db.remove_streak_request(user_id, target_id)
+
 @dp.message(lambda message: message.web_app_data is not None)
 async def handle_webapp_data(message: Message):
     """Обработчик данных от веб-приложения"""
@@ -132,17 +236,51 @@ async def handle_webapp_data(message: Message):
             today = datetime.now(timezone.utc).date()
             
             # Получаем список активных собеседников
-            streaks = await db.get_user_streaks(user_id, user_id)  # Используем user_id как chat_id
-            for username, _ in streaks:
+            streaks = await db.get_user_streaks(user_id, user_id)
+            for username, streak in streaks:
                 partner_id = await db.get_user_id_by_username(username)
                 if partner_id:
                     await db.mark_message(user_id, partner_id, today)
+                    
+                    # Проверяем, отметил ли партнер общение
+                    if await db.check_both_marked(user_id, partner_id, today):
+                        # Уведомляем обоих пользователей
+                        streak_count = await db.get_streak_count(user_id, partner_id)
+                        days_word = get_days_word(streak_count)
+                        
+                        for uid in [user_id, partner_id]:
+                            partner = await bot.get_chat(partner_id if uid == user_id else user_id)
+                            await bot.send_message(
+                                uid,
+                                f"✨ Вы и @{partner.username} отметили общение сегодня!\n"
+                                f"Ваша серия: {streak_count} {days_word} подряд 🎉"
+                            )
             
             await message.answer("✅ Общение за сегодня отмечено!")
             
+        elif action == 'get_streaks':
+            # Возвращаем актуальный список стриков
+            user_id = message.from_user.id
+            streaks = await db.get_user_streaks(user_id, user_id)
+            
+            streak_data = []
+            for username, count in streaks:
+                last_chat = await db.get_last_chat_date(user_id, await db.get_user_id_by_username(username))
+                streak_data.append({
+                    'username': username,
+                    'count': count,
+                    'last_chat': 'Сегодня' if last_chat == datetime.now(timezone.utc).date() else 'Вчера' if (datetime.now(timezone.utc).date() - last_chat).days == 1 else f"{last_chat.strftime('%d.%m.%Y')}"
+                })
+            
+            await message.answer(json.dumps({'streaks': streak_data}))
+            
         elif action == 'select_user':
-            # Здесь будет логика выбора пользователя из контактов
-            pass
+            # Обработка выбора пользователя из веб-интерфейса
+            target_username = data.get('username')
+            if target_username:
+                # Эмулируем команду /chat
+                command = CommandObject(command='chat', args=f'@{target_username}')
+                await cmd_chat(message, command)
             
     except json.JSONDecodeError:
         await message.answer("❌ Произошла ошибка при обработке данных.")
@@ -178,45 +316,6 @@ async def cmd_help(message: Message):
             "• Используйте /streaks для просмотра ваших серий общения\n"
             "• При пропуске дня стрик сбрасывается"
         )
-
-@dp.message(Command("chat"))
-async def cmd_chat(message: Message, command: CommandObject):
-    """Установка собеседника для отслеживания общения"""
-    if message.chat.type != ChatType.PRIVATE:
-        await message.answer(
-            "⚠️ Эта команда работает только в личных сообщениях с ботом."
-        )
-        return
-
-    if not command.args:
-        await message.answer(
-            "ℹ️ Пожалуйста, укажите username пользователя.\n"
-            "Пример: /chat @username"
-        )
-        return
-
-    user_id = message.from_user.id
-    target_username = command.args.strip('@')
-    
-    # Проверяем, что пользователь не пытается добавить сам себя
-    if message.from_user.username and target_username == message.from_user.username:
-        await message.answer("❌ Вы не можете добавить сами себя.")
-        return
-    
-    # Добавляем пользователя в словарь собеседников
-    if user_id not in dm_partners:
-        dm_partners[user_id] = {}
-    
-    dm_partners[user_id][target_username] = None  # None означает, что мы ещё не знаем ID пользователя
-    
-    await message.answer(
-        f"✅ Отлично! Я буду отслеживать ваше общение с @{target_username}.\n\n"
-        f"📝 Инструкция:\n"
-        f"1. Просто пишите мне сообщения каждый день\n"
-        f"2. Попросите @{target_username} написать:\n"
-        f"   /chat @{message.from_user.username or str(user_id)}\n\n"
-        f"🎯 Стрик начнёт считаться, когда вы оба напишете мне в один день!"
-    )
 
 @dp.message(Command("streaks"))
 async def cmd_streaks(message: Message):
