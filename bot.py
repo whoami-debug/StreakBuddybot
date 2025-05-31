@@ -398,6 +398,7 @@ async def handle_message(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or str(user_id)
     chat_id = message.chat.id
+    today = datetime.now(timezone.utc).date()
     
     # Добавляем пользователя, если его еще нет
     await db.add_user(user_id, username)
@@ -409,8 +410,6 @@ async def handle_message(message: Message):
     
     # Обработка групповых сообщений
     else:
-        today = datetime.now(timezone.utc).date()
-        
         # Получаем всех активных пользователей в группе
         async with aiosqlite.connect(db.db_name) as conn:
             # Получаем всех пользователей, которые писали сегодня в группе
@@ -433,20 +432,32 @@ async def handle_message(message: Message):
                 # Если нет, создаем пару автоматически
                 await db.add_streak_pair(user_id, other_id)
             
+            # Отмечаем общение между пользователями
+            await db.mark_message(user_id, other_id, today)
+            await db.mark_message(other_id, user_id, today)
+            
             # Проверяем, отметили ли оба пользователя общение
             if await db.check_both_marked(user_id, other_id, today):
                 # Получаем текущий стрик
                 streak_count = await db.get_streak_count(user_id, other_id)
-                days_word = get_days_word(streak_count)
                 
-                # Отправляем уведомление только если стрик увеличился
                 if streak_count > 0:
+                    days_word = get_days_word(streak_count)
                     user_mention = f"@{username}" if username != str(user_id) else message.from_user.first_name
                     other_mention = f"@{other_username}"
                     
-                    await message.answer(
-                        f"🎉 {user_mention} и {other_mention} общаются уже {streak_count} {days_word} подряд!"
-                    )
+                    # Отправляем уведомление только если это первое сообщение за день
+                    async with aiosqlite.connect(db.db_name) as conn:
+                        async with conn.execute("""
+                            SELECT COUNT(*) FROM messages 
+                            WHERE user_id = ? AND partner_id = ? AND chat_date = ?
+                        """, (user_id, other_id, today)) as cursor:
+                            message_count = (await cursor.fetchone())[0]
+                            
+                            if message_count == 1:
+                                await message.answer(
+                                    f"🎉 {user_mention} и {other_mention} общаются уже {streak_count} {days_word} подряд!"
+                                )
                     
                     # Отправляем обновленные данные в веб-интерфейс обоим пользователям
                     await send_streaks_data(user_id)

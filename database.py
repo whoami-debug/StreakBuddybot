@@ -121,46 +121,55 @@ class Database:
     async def mark_message(self, user_id: int, partner_id: int, chat_date: date):
         """Отметка сообщения между пользователями"""
         async with aiosqlite.connect(self.db_name) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO messages (user_id, partner_id, chat_date) VALUES (?, ?, ?)",
-                (user_id, partner_id, chat_date)
-            )
-            await db.commit()
+            # Проверяем, существует ли уже сообщение за этот день
+            async with db.execute("""
+                SELECT 1 FROM messages 
+                WHERE user_id = ? AND partner_id = ? AND chat_date = ?
+            """, (user_id, partner_id, chat_date)) as cursor:
+                if not await cursor.fetchone():
+                    # Добавляем новое сообщение только если его еще нет
+                    await db.execute(
+                        "INSERT INTO messages (user_id, partner_id, chat_date) VALUES (?, ?, ?)",
+                        (user_id, partner_id, chat_date)
+                    )
+                    await db.commit()
 
     async def check_both_marked(self, user_id: int, partner_id: int, chat_date: date) -> bool:
         """Проверка, отметили ли оба пользователя общение в указанный день"""
         async with aiosqlite.connect(self.db_name) as db:
             async with db.execute("""
                 SELECT COUNT(*) FROM messages 
-                WHERE (user_id = ? AND partner_id = ? AND chat_date = ?) 
-                OR (user_id = ? AND partner_id = ? AND chat_date = ?)
-            """, (user_id, partner_id, chat_date, partner_id, user_id, chat_date)) as cursor:
+                WHERE ((user_id = ? AND partner_id = ?) OR (user_id = ? AND partner_id = ?))
+                AND chat_date = ?
+            """, (user_id, partner_id, partner_id, user_id, chat_date)) as cursor:
                 count = (await cursor.fetchone())[0]
-                return count == 2
-
-    async def get_last_chat_date(self, user_id: int, partner_id: int) -> Optional[date]:
-        """Получение даты последнего общения между пользователями"""
-        async with aiosqlite.connect(self.db_name) as db:
-            async with db.execute("""
-                SELECT MAX(chat_date) FROM messages 
-                WHERE (user_id = ? AND partner_id = ?) 
-                OR (user_id = ? AND partner_id = ?)
-            """, (user_id, partner_id, partner_id, user_id)) as cursor:
-                result = await cursor.fetchone()
-                return datetime.strptime(result[0], '%Y-%m-%d').date() if result[0] else None
+                return count >= 2
 
     async def get_streak_count(self, user_id: int, partner_id: int) -> int:
         """Получение текущего количества дней в стрике"""
         async with aiosqlite.connect(self.db_name) as db:
             today = datetime.now(timezone.utc).date()
             
-            # Получаем все даты общения
+            # Получаем все даты, когда оба пользователя общались
             async with db.execute("""
-                SELECT DISTINCT chat_date 
-                FROM messages 
-                WHERE ((user_id = ? AND partner_id = ?) OR (user_id = ? AND partner_id = ?))
-                AND chat_date <= ?
-                ORDER BY chat_date DESC
+                WITH user1_dates AS (
+                    SELECT chat_date
+                    FROM messages
+                    WHERE user_id = ? AND partner_id = ?
+                ),
+                user2_dates AS (
+                    SELECT chat_date
+                    FROM messages
+                    WHERE user_id = ? AND partner_id = ?
+                ),
+                common_dates AS (
+                    SELECT DISTINCT u1.chat_date
+                    FROM user1_dates u1
+                    JOIN user2_dates u2 ON u1.chat_date = u2.chat_date
+                    WHERE u1.chat_date <= ?
+                    ORDER BY u1.chat_date DESC
+                )
+                SELECT chat_date FROM common_dates
             """, (user_id, partner_id, partner_id, user_id, today)) as cursor:
                 dates = [datetime.strptime(row[0], '%Y-%m-%d').date() for row in await cursor.fetchall()]
 
@@ -168,13 +177,18 @@ class Database:
                 return 0
 
             # Считаем непрерывную серию
-            streak = 0
-            current_date = today
+            streak = 1
+            prev_date = dates[0]
             
-            for chat_date in dates:
-                if (current_date - chat_date).days <= 1:
+            # Если последняя дата не сегодня и не вчера, сбрасываем стрик
+            if (today - prev_date).days > 1:
+                return 0
+            
+            # Проверяем последовательность дат
+            for current_date in dates[1:]:
+                if (prev_date - current_date).days == 1:
                     streak += 1
-                    current_date = chat_date
+                    prev_date = current_date
                 else:
                     break
 
@@ -208,4 +222,28 @@ class Database:
                 OR (user_id = ? AND partner_id = ?)
             """, (user_id, partner_id, partner_id, user_id)) as cursor:
                 result = await cursor.fetchone()
-                return bool(result) 
+                return bool(result)
+
+    async def get_last_chat_date(self, user_id: int, partner_id: int) -> Optional[date]:
+        """Получение даты последнего общения между пользователями"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute("""
+                WITH user1_dates AS (
+                    SELECT chat_date
+                    FROM messages
+                    WHERE user_id = ? AND partner_id = ?
+                ),
+                user2_dates AS (
+                    SELECT chat_date
+                    FROM messages
+                    WHERE user_id = ? AND partner_id = ?
+                ),
+                common_dates AS (
+                    SELECT DISTINCT u1.chat_date
+                    FROM user1_dates u1
+                    JOIN user2_dates u2 ON u1.chat_date = u2.chat_date
+                )
+                SELECT MAX(chat_date) FROM common_dates
+            """, (user_id, partner_id, partner_id, user_id)) as cursor:
+                result = await cursor.fetchone()
+                return datetime.strptime(result[0], '%Y-%m-%d').date() if result[0] else None 
