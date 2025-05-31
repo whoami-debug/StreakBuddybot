@@ -57,6 +57,19 @@ if (!isTelegramEnv) {
     window.Telegram.WebApp.MainButton = window.Telegram.WebApp.MainButton || {isVisible: false, show: function(){}, hide: function(){}};
      // И так далее для других важных объектов, если они используются напрямую
 }
+
+// Применяем themeParams как CSS переменные для локальной отладки, если не в Telegram
+if (!isTelegramEnv && window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.themeParams) {
+    const themeParams = window.Telegram.WebApp.themeParams;
+    for (const key in themeParams) {
+        if (Object.prototype.hasOwnProperty.call(themeParams, key)) {
+            document.documentElement.style.setProperty(`--tg-theme-${key.replace(/_/g, '-')}`, themeParams[key]);
+            // Для обратной совместимости, если где-то используются старые имена переменных (хотя лучше перейти на новые)
+            document.documentElement.style.setProperty(`--${key.replace(/_/g, '-')}`, themeParams[key]); 
+        }
+    }
+    console.log('script.js: Applied emulated themeParams as CSS variables.');
+}
 // --- Конец кода для эмуляции/дополнения Telegram WebApp ---
 
 console.log('script.js: Script loaded. Environment:', isTelegramEnv ? 'Telegram' : 'Browser/Emulated');
@@ -66,7 +79,11 @@ tg.expand(); // Expand the Web App to full height
 const criticalErrorDiv = document.getElementById('error');
 const feedbackDiv = document.getElementById('feedback');
 const streakListDiv = document.getElementById('streakList');
+const userBalanceSpan = document.getElementById('userBalance'); // Новый элемент для баланса
 let currentUserId = null;
+let currentUserBalance = 0; // Храним баланс локально
+
+const FREEZE_COST_PER_DAY = 1; // Стоимость заморозки (должна совпадать с серверной)
 
 // Определяем базовый URL для API
 const IS_LOCALHOST_DEBUG = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
@@ -121,6 +138,10 @@ async function fetchStreaks() {
         }
         const data = await response.json();
         console.log('script.js: Streaks data from server:', data);
+        currentUserBalance = data.balance !== undefined ? data.balance : 0;
+        if (userBalanceSpan) {
+            userBalanceSpan.textContent = currentUserBalance;
+        }
         updateStreaksUI(data.streaks);
     } catch (err) {
         console.error('script.js: Error in fetchStreaks catch block:', err);
@@ -130,13 +151,22 @@ async function fetchStreaks() {
 
 function createStreakCardHTML(streak) {
     const safePartnerUsername = streak.partner_username.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+    const partnerMention = streak.partner_username ? `@${streak.partner_username}` : `ID: ${streak.partner_id}`;
+    const chatLink = streak.partner_username 
+        ? `tg://resolve?domain=${streak.partner_username}` 
+        : `tg://user?id=${streak.partner_id}`;
+
     return (
         '<div class="streak-card">' +
             '<div class="streak-info">' +
-                '<div class="user-pair">Вы и @' + streak.partner_username + '</div>' +
+                '<div class="user-pair">Вы и ' + partnerMention + '</div>' +
                 '<div class="streak-count">' + streak.streak_count + '🔥</div>' +
             '</div>' +
-            '<button onclick="markToday(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Продлить стрик сегодня</button>' +
+            '<div class="streak-actions">' +
+                '<button onclick="markToday(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Продлить стрик</button>' +
+                '<a href="' + chatLink + '" class="chat-link-button" target="_blank" rel="noopener noreferrer">Написать</a>' +
+                '<button class="freeze-button" onclick="promptFreezeStreak(' + streak.partner_id + ', \'' + safePartnerUsername + '\')">Заморозить (❄️)</button>' + // Новая кнопка
+            '</div>' +
         '</div>'
     );
 }
@@ -191,6 +221,72 @@ async function markToday(partnerId, partnerUsername) {
     } catch (err) {
         console.error('script.js: Error in markToday catch block:', err);
          showFeedback('Ошибка с @' + partnerUsername + ': ' + err.message, true);
+    }
+}
+
+async function promptFreezeStreak(partnerId, partnerUsernameSafe) {
+    const partnerUsernameDisplay = partnerUsernameSafe.replace(/&quot;/g, '"').replace(/\\\\'/g, "'");
+    console.log('script.js: promptFreezeStreak called for partnerId:', partnerId, 'partnerUsername:', partnerUsernameDisplay);
+
+    const daysToFreezeStr = prompt(`На сколько дней вы хотите заморозить стрик с @${partnerUsernameDisplay}?\\nСтоимость: ${FREEZE_COST_PER_DAY} балл(а) за день.\\nМаксимум: 30 дней.`);
+
+    if (daysToFreezeStr === null) { // Пользователь нажал "Отмена"
+        showFeedback('Заморозка отменена.', false);
+        return;
+    }
+
+    const daysToFreeze = parseInt(daysToFreezeStr, 10);
+
+    if (isNaN(daysToFreeze) || daysToFreeze <= 0) {
+        showFeedback('Неверное количество дней. Пожалуйста, введите положительное число.', true);
+        return;
+    }
+    if (daysToFreeze > 30) {
+        showFeedback('Максимальное количество дней для заморозки: 30.', true);
+        return;
+    }
+
+    const cost = daysToFreeze * FREEZE_COST_PER_DAY;
+    if (currentUserBalance < cost) {
+        showFeedback(`Недостаточно баллов для заморозки на ${daysToFreeze} дней (нужно ${cost}, у вас ${currentUserBalance}).`, true);
+        return;
+    }
+    
+    showFeedback(`Замораживаем стрик с @${partnerUsernameDisplay} на ${daysToFreeze} дней...`, false);
+
+    const apiUrlFreeze = API_BASE_URL + '/api/webapp/freeze_streak';
+    console.log('script.js: Attempting to POST to:', apiUrlFreeze, 'with data:', { user_id: currentUserId, partner_id: partnerId, days: daysToFreeze });
+
+    try {
+        const response = await fetch(apiUrlFreeze, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: currentUserId, partner_id: partnerId, days: daysToFreeze }),
+        });
+        console.log('script.js: Freeze streak response received:', response);
+        const result = await response.json();
+        console.log('script.js: Freeze streak result from server:', result);
+
+        if (!response.ok) {
+            console.error('script.js: Freeze streak error - Response not OK. Status:', response.status, 'Result data:', result);
+            throw new Error(result.error || 'Ошибка ' + response.status + ' от сервера при заморозке');
+        }
+        
+        showFeedback(result.message || "Действие по заморозке выполнено.", !result.success);
+
+        if (result.success) {
+            currentUserBalance = result.new_balance !== undefined ? result.new_balance : currentUserBalance - cost; // Обновляем баланс
+             if (userBalanceSpan) {
+                userBalanceSpan.textContent = currentUserBalance;
+            }
+            // Можно добавить обновление информации о заморозке на карточке, если сервер ее вернет
+            // Пока просто перезапросим все стрики для обновления (хотя это может быть избыточно, если только баланс изменился)
+            setTimeout(fetchStreaks, 1000); // Обновить список стриков и баланс
+        }
+
+    } catch (err) {
+        console.error('script.js: Error in freezeStreak catch block:', err);
+         showFeedback('Ошибка при заморозке с @' + partnerUsernameDisplay + ': ' + err.message, true);
     }
 }
 

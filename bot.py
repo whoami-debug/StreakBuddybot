@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import json
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Set, Tuple
 from pathlib import Path
 from collections import defaultdict
@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiohttp_cors
 
 from database import Database
-from config import BOT_TOKEN, WEBAPP_URL
+from config import BOT_TOKEN, WEBAPP_URL, BOT_OWNER_ID
 
 # Настройка логирования с более подробным форматом
 logging.basicConfig(
@@ -55,6 +55,12 @@ async def reset_daily_caches_if_new_day():
         group_activity_today.clear()
         notified_streaks_today.clear()
         current_bot_date = today
+        # Добавляем сброс неактивных стриков
+        try:
+            logger.info(f"DB: Вызов reset_inactive_streaks для даты {today}")
+            await db.reset_inactive_streaks(today)
+        except Exception as e:
+            logger.error(f"DB: Ошибка при вызове db.reset_inactive_streaks: {e}", exc_info=True)
 
 @routes.get('/')
 async def serve_webapp(request):
@@ -78,16 +84,19 @@ async def get_webapp_user_streaks(request):
             return web.json_response({'error': 'Invalid user_id format'}, status=400)
 
         logger.info(f"/api/webapp/user_streaks: Calling db.get_user_streaks with user_id={user_id}, chat_id={user_id}")
-        streaks_data = await db.get_user_streaks(user_id, user_id)
+        streaks_data = await db.get_user_streaks(user_id, user_id) # chat_id=user_id для получения всех стриков пользователя
         logger.info(f"/api/webapp/user_streaks: Received streaks_data from DB: {streaks_data}")
         
+        user_balance = await db.get_user_balance(user_id)
+        logger.info(f"/api/webapp/user_streaks: Fetched user balance for {user_id}: {user_balance}")
+
         formatted_streaks = []
         if streaks_data:
             for pid, puname, scount in streaks_data:
                 formatted_streaks.append({'partner_id': pid, 'partner_username': puname, 'streak_count': scount})
         
-        logger.info(f"/api/webapp/user_streaks: Responding with formatted_streaks: {formatted_streaks}")
-        return web.json_response({'streaks': formatted_streaks})
+        logger.info(f"/api/webapp/user_streaks: Responding with formatted_streaks and balance.")
+        return web.json_response({'streaks': formatted_streaks, 'balance': user_balance})
     except Exception as e:
         logger.error(f"Error in /api/webapp/user_streaks: {e}", exc_info=True)
         # В случае любой ошибки, возвращаем более явное сообщение об ошибке, которое клиент сможет показать
@@ -119,6 +128,87 @@ async def post_webapp_mark_today(request):
     except Exception as e:
         logger.error(f"Error in /api/webapp/mark_today: {e}", exc_info=True)
         return web.json_response({'error': f'Internal server error: {str(e)}'}, status=500)
+
+@routes.post('/api/webapp/freeze_streak')
+async def post_webapp_freeze_streak(request):
+    try:
+        data = await request.json()
+        user_id_str = data.get('user_id')
+        partner_id_str = data.get('partner_id')
+        days_to_freeze_str = data.get('days')
+
+        if not all([user_id_str, partner_id_str, days_to_freeze_str]):
+            logger.warning("/api/webapp/freeze_streak: Missing user_id, partner_id, or days.")
+            return web.json_response({'error': 'user_id, partner_id, and days are required'}, status=400, reason="Missing parameters")
+
+        try:
+            user_id = int(user_id_str)
+            partner_id = int(partner_id_str)
+            days_to_freeze = int(days_to_freeze_str)
+        except ValueError:
+            logger.warning(f"/api/webapp/freeze_streak: Invalid ID or days format. User: {user_id_str}, Partner: {partner_id_str}, Days: {days_to_freeze_str}")
+            return web.json_response({'error': 'Invalid user_id, partner_id, or days format'}, status=400, reason="Invalid format")
+
+        if days_to_freeze <= 0 or days_to_freeze > 30: # Максимум 30 дней
+            logger.warning(f"/api/webapp/freeze_streak: Invalid days_to_freeze value: {days_to_freeze}")
+            return web.json_response({'error': 'Days to freeze must be between 1 and 30.'}, status=400, reason="Invalid days value")
+
+        FREEZE_COST_PER_DAY = 1 
+        cost = days_to_freeze * FREEZE_COST_PER_DAY
+        user_balance = await db.get_user_balance(user_id)
+
+        if user_balance < cost:
+            logger.info(f"/api/webapp/freeze_streak: Insufficient balance for user {user_id}. Needed: {cost}, Has: {user_balance}")
+            return web.json_response({
+                'success': False, 
+                'message': f'Недостаточно баллов. Нужно: {cost}, у вас: {user_balance}',
+                'error': 'insufficient_balance' 
+            }, status=200) 
+
+        today = datetime.now(timezone.utc).date()
+        new_freeze_end_date = today + timedelta(days=days_to_freeze)
+        
+        current_freeze_end_date = await db.get_active_freeze(user_id, partner_id, today)
+        if current_freeze_end_date and current_freeze_end_date >= new_freeze_end_date:
+            logger.info(f"/api/webapp/freeze_streak: Existing longer freeze for {user_id}-{partner_id} until {current_freeze_end_date}.")
+            return web.json_response({
+                'success': False, 
+                'message': f'У вас уже активна заморозка с этим пользователем до {current_freeze_end_date.strftime("%d.%m.%Y")}, что дольше или равно запрошенному.',
+                'error': 'existing_longer_freeze'
+            }, status=200)
+
+        if await db.update_user_balance(user_id, -cost): 
+            if await db.add_streak_freeze(user_id, partner_id, new_freeze_end_date):
+                new_balance = await db.get_user_balance(user_id)
+                logger.info(f"/api/webapp/freeze_streak: Streak for {user_id}-{partner_id} frozen until {new_freeze_end_date}. Cost: {cost}. New balance: {new_balance}")
+                try:
+                    # Имена пользователей для уведомления могут быть None, если пользователь удален или не имеет username
+                    user_username_obj = await db.get_username_by_id(user_id)
+                    user_username_for_notification = f"@{user_username_obj}" if user_username_obj else f"Пользователь ID {user_id}"
+
+                    await bot.send_message(partner_id, f"ℹ️ {user_username_for_notification} заморозил ваш общий стрик до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
+                except Exception as e:
+                    logger.warning(f"/api/webapp/freeze_streak: Failed to send freeze notification to partner {partner_id}: {e}")
+                
+                return web.json_response({
+                    'success': True, 
+                    'message': f'Стрик успешно заморожен до {new_freeze_end_date.strftime("%d.%m.%Y")}!', 
+                    'new_balance': new_balance
+                })
+            else:
+                await db.update_user_balance(user_id, cost) 
+                logger.error(f"/api/webapp/freeze_streak: Failed to add streak freeze for {user_id}-{partner_id} after deducting balance.")
+                return web.json_response({'success': False, 'message': 'Не удалось активировать заморозку в базе. Баллы возвращены.', 'error': 'db_freeze_add_failed'}, status=200)
+        else:
+            logger.error(f"/api/webapp/freeze_streak: Failed to update balance for user {user_id} for freeze cost {cost}.")
+            return web.json_response({'success': False, 'message': 'Ошибка при списании баллов.', 'error': 'balance_deduction_failed'}, status=200)
+
+    except json.JSONDecodeError:
+        logger.error("/api/webapp/freeze_streak: Invalid JSON payload.")
+        return web.json_response({'error': 'Invalid JSON payload'}, status=400, reason="Invalid JSON")
+    except Exception as e:
+        logger.error(f"Error in /api/webapp/freeze_streak: {e}", exc_info=True)
+        return web.json_response({'error': f'Internal server error: {str(e)}'}, status=500, reason="Server error")
 
 # Словарь для хранения собеседников в личных сообщениях
 # Формат: {user_id: {partner_username: partner_id}}
@@ -670,47 +760,57 @@ async def cmd_reset(message: Message, command: CommandObject):
 async def cmd_help(message: Message, command: Optional[CommandObject] = None):
     """Показывает справку по использованию бота"""
     await reset_daily_caches_if_new_day()
+    
+    FREEZE_COST_PER_DAY = 1 
+
+    help_text_private_lines = [
+        "🌟 <b>Streak Buddy - Ваш помощник в общении</b>\\n",
+        "🤝 <b>Основные команды:</b>",
+        "/chat @username - Начать отслеживать общение",
+        "/streaks - Посмотреть текущие серии общения",
+        "/reset @username - Сбросить стрик с пользователем",
+        "/webapp - Открыть веб-интерфейс\\n",
+        "💰 <b>Баллы и Заморозка:</b>",
+        f"/mybalance - Показать ваш баланс баллов",
+        f"/freezestreak @username <кол-во дней> - Заморозить стрик (стоимость: {FREEZE_COST_PER_DAY} балл(а) за день)\\n",
+        "📊 <b>Как работают стрики:</b>",
+        "• День засчитывается при общении обоих собеседников",
+        "• Пропуск дня сбрасывает серию",
+        "• Можно поддерживать стрики с разными людьми",
+        "• Бот автоматически считает дни в группах\\n",
+        "💡 <b>Советы:</b>",
+        "• Используйте веб-интерфейс для удобного отслеживания",
+        "• Отмечайте общение каждый день",
+        "• Следите за уведомлениями о достижениях",
+        "• Соревнуйтесь с друзьями в длине стрика\\n",
+        "🎯 <b>Особые функции:</b>",
+        "• Автоматическое определение общения в группах",
+        "• Красивая статистика в веб-интерфейсе",
+        "• Уведомления о новых рекордах",
+        "• Возможность сброса стрика при необходимости"
+    ]
+    help_text_private = "\\n".join(help_text_private_lines)
+
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer(
-            "🌟 <b>Streak Buddy - Ваш помощник в общении</b>\n\n"
-            "🤝 <b>Основные команды:</b>\n"
-            "/chat @username - Начать отслеживать общение\n"
-            "/streaks - Посмотреть текущие серии общения\n"
-            "/reset @username - Сбросить стрик с пользователем\n"
-            "/webapp - Открыть веб-интерфейс\n\n"
-            "📊 <b>Как работают стрики:</b>\n"
-            "• День засчитывается при общении обоих собеседников\n"
-            "• Пропуск дня сбрасывает серию\n"
-            "• Можно поддерживать стрики с разными людьми\n"
-            "• Бот автоматически считает дни в группах\n\n"
-            "💡 <b>Советы:</b>\n"
-            "• Используйте веб-интерфейс для удобного отслеживания\n"
-            "• Отмечайте общение каждый день\n"
-            "• Следите за уведомлениями о достижениях\n"
-            "• Соревнуйтесь с друзьями в длине стрика\n\n"
-            "🎯 <b>Особые функции:</b>\n"
-            "• Автоматическое определение общения в группах\n"
-            "• Красивая статистика в веб-интерфейсе\n"
-            "• Уведомления о новых рекордах\n"
-            "• Возможность сброса стрика при необходимости",
-            parse_mode="HTML"
-        )
+        await message.answer(help_text_private, parse_mode="HTML")
     else:
+        # Существующий текст для групп, можно его тоже дополнить, если нужно
         await message.answer(
-            "✨ <b>Streak Buddy в групповых чатах</b>\n\n"
-            "🤝 <b>Как это работает:</b>\n"
-            "• Бот автоматически отслеживает общение участников\n"
-            "• Стрик засчитывается при общении двух людей в один день\n"
-            "• Серия сбрасывается при пропуске дня\n\n"
-            "📊 <b>Доступные команды:</b>\n"
-            "• /streaks - Посмотреть ваши серии общения\n"
-            "• /reset @username - Сбросить стрик с пользователем\n"
-            "• /help - Показать эту справку\n\n"
-            "💫 <b>Советы для групп:</b>\n"
-            "• Общайтесь каждый день для поддержания стрика\n"
-            "• Следите за уведомлениями о достижениях\n"
-            "• Соревнуйтесь с другими участниками\n"
-            "• Используйте веб-интерфейс для удобного просмотра",
+            "✨ <b>Streak Buddy в групповых чатах</b>\\n\\n"
+            "🤝 <b>Как это работает:</b>",
+            "• Бот автоматически отслеживает общение участников\\n"
+            "• Стрик засчитывается при общении двух людей в один день\\n"
+            "• Серия сбрасывается при пропуске дня\\n\\n"
+            "📊 <b>Доступные команды:</b>",
+            "• /streaks - Посмотреть ваши серии общения\\n"
+            "• /reset @username - Сбросить стрик с пользователем\\n"
+            "• /help - Показать эту справку\\n\\n"
+            "💫 <b>Советы для групп:</b>",
+            "• Общайтесь каждый день для поддержания стрика\\n"
+            "• Следите за уведомлениями о достижениях\\n"
+            "• Соревнуйтесь с другими участниками\\n"
+            "• Используйте веб-интерфейс для удобного просмотра\\n\\n"
+            "Полный список команд, включая управление баллами, доступен в личном чате с ботом.",
             parse_mode="HTML"
         )
 
@@ -808,6 +908,162 @@ async def cmd_streaks(message: Message, command: Optional[CommandObject] = None)
         logger.error(f"CMD: /streaks - Error processing /streaks for {username} ({user_id}): {e}", exc_info=True)
         await message.answer("🚫 Ой, что-то пошло не так при показе ваших стриков. Попробуйте еще раз позже.")
 
+# Новые команды для баланса и заморозки
+async def cmd_mybalance(message: Message):
+    await reset_daily_caches_if_new_day()
+    user_id = message.from_user.id
+    balance = await db.get_user_balance(user_id)
+    await message.answer(f"💰 Ваш текущий баланс: {balance} балл(ов).")
+
+async def cmd_addbalance(message: Message, command: CommandObject):
+    await reset_daily_caches_if_new_day()
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("⛔ Эту команду может использовать только владелец бота.")
+        return
+
+    if not command.args:
+        await message.answer("⚠️ Использование: /addbalance <user_id или @username> <количество>")
+        return
+
+    args = command.args.split()
+    if len(args) != 2:
+        await message.answer("⚠️ Использование: /addbalance <user_id или @username> <количество>")
+        return
+
+    target_identifier, amount_str = args
+    
+    try:
+        amount = int(amount_str)
+    except ValueError:
+        await message.answer("❌ Неверный формат количества баллов.")
+        return
+
+    target_user_id: Optional[int] = None
+    target_username_display: str = target_identifier
+
+    if target_identifier.startswith('@'):
+        username = target_identifier.strip('@')
+        target_user_id = await db.get_user_id_by_username(username)
+        target_username_display = f"@{username}"
+        if not target_user_id:
+            await message.answer(f"❌ Пользователь @{username} не найден в базе.")
+            return
+    else:
+        try:
+            target_user_id = int(target_identifier)
+            # Попробуем получить username для более красивого ответа
+            fetched_username = await db.get_username_by_id(target_user_id)
+            if fetched_username:
+                target_username_display = f"@{fetched_username} (ID: {target_user_id})"
+            else: # Если юзернейма нет, но ID валидный, все равно работаем
+                 await db.add_user(target_user_id, str(target_user_id)) # Убедимся, что юзер есть в users
+                 logger.info(f"Admin: Adding balance to user by ID {target_user_id} who might not have a username or not started bot.")
+        except ValueError:
+            await message.answer("❌ Неверный формат user_id или @username.")
+            return
+    
+    if target_user_id is None: # На всякий случай, если что-то пошло не так с username
+        await message.answer(f"❌ Не удалось определить пользователя {target_identifier}.")
+        return
+
+    if await db.update_user_balance(target_user_id, amount):
+        new_balance = await db.get_user_balance(target_user_id)
+        await message.answer(f"✅ Баланс пользователя {target_username_display} успешно пополнен на {amount} балл(ов).\nНовый баланс: {new_balance} балл(ов).")
+    else:
+        await message.answer(f"❌ Не удалось обновить баланс для {target_username_display}.")
+
+
+async def cmd_freezestreak(message: Message, command: CommandObject):
+    await reset_daily_caches_if_new_day()
+    user_id = message.from_user.id
+    
+    FREEZE_COST_PER_DAY = 1 # 1 балл за 1 день заморозки (можно вынести в config.py)
+
+    if not command.args:
+        await message.answer(f"⚠️ Использование: /freezestreak @username <количество_дней>\nСтоимость: {FREEZE_COST_PER_DAY} балл(а) за 1 день заморозки.")
+        return
+
+    args = command.args.split()
+    if len(args) != 2:
+        await message.answer(f"⚠️ Использование: /freezestreak @username <количество_дней>")
+        return
+    
+    target_username_str, days_to_freeze_str = args
+    target_username = target_username_str.strip('@')
+
+    try:
+        days_to_freeze = int(days_to_freeze_str)
+        if days_to_freeze <= 0:
+            await message.answer("❌ Количество дней для заморозки должно быть положительным числом.")
+            return
+        if days_to_freeze > 30: # Ограничение, чтобы не замораживали на слишком долгий срок
+             await message.answer("❌ Максимальное количество дней для заморозки: 30.")
+             return
+    except ValueError:
+        await message.answer("❌ Неверный формат количества дней.")
+        return
+
+    partner_id = await db.get_user_id_by_username(target_username)
+    if not partner_id:
+        await message.answer(f"❌ Пользователь @{target_username} не найден. Убедитесь, что он начал диалог с ботом.")
+        return
+        
+    if user_id == partner_id:
+        await message.answer("❌ Вы не можете заморозить стрик с самим собой.")
+        return
+
+    # Проверяем, есть ли вообще стрик с этим пользователем (даже если он 0)
+    # Для этого нужно, чтобы пара была в streak_pairs
+    # get_streak_count вернет 0 если пары нет или стрик 0. Нам нужно убедиться, что пара существует.
+    # Простой способ - попытаться получить streak_count. Если есть пара, он не вызовет ошибку.
+    # Или лучше иметь отдельную функцию db.check_streak_pair_exists(user_id, partner_id)
+    # Пока воспользуемся существующей логикой: если add_streak_pair не вызывалась, стрика нет.
+    # Но для заморозки лучше, чтобы стрик уже был как-то инициирован (через /chat)
+    
+    # Убедимся, что пользователи являются парой (хотя бы формально)
+    # Это должно было произойти через /chat, но на всякий случай
+    await db.add_streak_pair(user_id, partner_id) # Создаст, если нет. Не логирует, если уже есть.
+
+    current_streak_count = await db.get_streak_count(user_id, partner_id)
+    # Не важно, какой current_streak_count, заморозить можно и нулевой стрик, чтобы он не сбросился (если был сброшен только что)
+    # или чтобы предотвратить сброс активного.
+
+    cost = days_to_freeze * FREEZE_COST_PER_DAY
+    user_balance = await db.get_user_balance(user_id)
+
+    if user_balance < cost:
+        await message.answer(f"⚠️ Недостаточно баллов для заморозки.\nТребуется: {cost} (за {days_to_freeze} дн.), у вас: {user_balance}.\nПополните баланс или выберите меньший срок.")
+        return
+
+    # Проверяем, нет ли уже активной заморозки, которая заканчивается позже
+    today = datetime.now(timezone.utc).date()
+    current_freeze_end_date = await db.get_active_freeze(user_id, partner_id, today)
+    
+    new_freeze_end_date = today + timedelta(days=days_to_freeze)
+
+    if current_freeze_end_date and current_freeze_end_date >= new_freeze_end_date:
+        await message.answer(f"ℹ️ У вас уже активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}, что дольше или равно запрошенному сроку. Новая заморозка не требуется.")
+        return
+    
+    if current_freeze_end_date and current_freeze_end_date < new_freeze_end_date:
+         await message.answer(f"ℹ️ У вас была активна заморозка с @{target_username} до {current_freeze_end_date.strftime('%d.%m.%Y')}. Она будет продлена до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
+
+
+    if await db.update_user_balance(user_id, -cost): # Списываем баллы
+        if await db.add_streak_freeze(user_id, partner_id, new_freeze_end_date):
+            await message.answer(f"❄️ Стрик с @{target_username} успешно заморожен до {new_freeze_end_date.strftime('%d.%m.%Y')}!\nСписано {cost} балл(ов). Ваш новый баланс: {user_balance - cost}.")
+            # Уведомление партнеру (опционально)
+            try:
+                await bot.send_message(partner_id, f"ℹ️ Пользователь @{message.from_user.username} заморозил ваш общий стрик до {new_freeze_end_date.strftime('%d.%m.%Y')}.")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить уведомление о заморозке партнеру {partner_id}: {e}")
+        else:
+            # Возвращаем баллы, если заморозка не удалась
+            await db.update_user_balance(user_id, cost) 
+            await message.answer("❌ Не удалось активировать заморозку. Баллы не списаны. Попробуйте позже.")
+    else:
+        await message.answer("❌ Ошибка при списании баллов. Заморозка не активирована.")
+
 async def main():
     """Главная функция запуска бота"""
     global current_bot_date
@@ -828,7 +1084,12 @@ async def main():
     dp.message.register(cmd_chat, Command("chat"))
     dp.message.register(cmd_reset, Command("reset"))
     dp.message.register(cmd_help, Command("help"))
-    dp.message.register(cmd_streaks, Command("streaks")) # <<< Наш проблемный хендлер
+    dp.message.register(cmd_streaks, Command("streaks"))
+
+    # Новые команды
+    dp.message.register(cmd_mybalance, Command("mybalance"))
+    dp.message.register(cmd_addbalance, Command("addbalance"))
+    dp.message.register(cmd_freezestreak, Command("freezestreak"))
 
     # Хендлер для данных из WebApp
     dp.message.register(handle_webapp_data, lambda message: message.web_app_data is not None)

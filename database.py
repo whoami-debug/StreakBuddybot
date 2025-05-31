@@ -14,10 +14,18 @@ class Database:
     async def init(self):
         """Инициализация базы данных"""
         async with aiosqlite.connect(self.db_name) as db:
+            # Проверяем и добавляем столбец balance в таблицу users, если его нет
+            async with db.execute("PRAGMA table_info(users)") as cursor:
+                columns = [row[1] for row in await cursor.fetchall()]
+            if 'balance' not in columns:
+                await db.execute("ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0")
+                self.logger.info("DB: Added 'balance' column to 'users' table.")
+            
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     username TEXT NOT NULL,
+                    balance INTEGER DEFAULT 0, -- Добавлено здесь для новых БД
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -67,8 +75,20 @@ class Database:
                     FOREIGN KEY (marked_partner_id) REFERENCES users(user_id)
                 )
             """)
+            # Новая таблица для заморозок
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS streak_freezes (
+                    user_id INTEGER NOT NULL,
+                    partner_id INTEGER NOT NULL,
+                    freeze_end_date DATE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, partner_id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    FOREIGN KEY (partner_id) REFERENCES users(user_id)
+                )
+            """)
             await db.commit()
-            self.logger.info("База данных инициализирована/проверена (с webapp_daily_marks).")
+            self.logger.info("База данных инициализирована/проверена (с users.balance и streak_freezes).")
 
     async def add_user(self, user_id: int, username: str):
         async with aiosqlite.connect(self.db_name) as db:
@@ -365,3 +385,131 @@ class Database:
         except Exception as e:
             self.logger.error(f"DB: Error in reset_streak for {user_id}-{partner_id}: {e}", exc_info=True)
             return False 
+
+    async def reset_inactive_streaks(self, current_date: date):
+        """
+        Сбрасывает streak_count на 0 для пар, где последнее взаимодействие
+        было не вчера и не сегодня (т.е. пропущено более одного дня),
+        ЕСЛИ СТРИК НЕ ЗАМОРОЖЕН.
+        """
+        try:
+            async with aiosqlite.connect(self.db_name) as db:
+                # Выбираем user_id, partner_id, last_streak_date, streak_count
+                async with db.execute("SELECT user_id, partner_id, last_streak_date, streak_count FROM streak_pairs WHERE streak_count > 0") as cursor:
+                    active_streaks = await cursor.fetchall()
+                
+                count_reset = 0
+                for user_id, partner_id, last_streak_dt_str, streak_count in active_streaks:
+                    # Проверяем активную заморозку ПЕРЕД любыми действиями
+                    active_freeze_end_date = await self.get_active_freeze(user_id, partner_id, current_date)
+                    if active_freeze_end_date:
+                        self.logger.info(f"DB: reset_inactive_streaks - Streak for {user_id}-{partner_id} is frozen until {active_freeze_end_date}. Skipping reset.")
+                        continue # Пропускаем сброс, если стрик заморожен
+
+                    if not last_streak_dt_str: # Если даты нет, но стрик > 0 - это аномалия, сбрасываем
+                        self.logger.warning(f"DB: reset_inactive_streaks - Anomaly: streak_count > 0 ({streak_count}) but no last_streak_date for {user_id}-{partner_id}. Resetting.")
+                        await db.execute("UPDATE streak_pairs SET streak_count = 0 WHERE user_id = ? AND partner_id = ?", (user_id, partner_id))
+                        await db.execute("UPDATE streak_pairs SET streak_count = 0 WHERE user_id = ? AND partner_id = ?", (partner_id, user_id))
+                        count_reset += 1
+                        continue
+
+                    last_streak_dt = datetime.strptime(last_streak_dt_str, '%Y-%m-%d').date()
+                    
+                    # Если последнее взаимодействие было не вчера и не сегодня, то стрик сбрасывается
+                    # (current_date - last_streak_dt).days == 1 означает, что последнее общение было вчера - это ОК
+                    # (current_date - last_streak_dt).days == 0 означает, что последнее общение было сегодня - это ОК
+                    if (current_date - last_streak_dt).days > 1:
+                        self.logger.info(f"DB: reset_inactive_streaks - Resetting streak for {user_id}-{partner_id}. Last streak: {last_streak_dt}, Current date: {current_date}, Old count: {streak_count}")
+                        await db.execute("UPDATE streak_pairs SET streak_count = 0 WHERE user_id = ? AND partner_id = ?", (user_id, partner_id))
+                        # Обновляем и симметричную пару
+                        await db.execute("UPDATE streak_pairs SET streak_count = 0 WHERE user_id = ? AND partner_id = ?", (partner_id, user_id))
+                        count_reset += 1
+                
+                if count_reset > 0:
+                    await db.commit()
+                    self.logger.info(f"DB: reset_inactive_streaks - Successfully reset {count_reset} inactive streaks.")
+                else:
+                    self.logger.info(f"DB: reset_inactive_streaks - No streaks to reset.")
+        except Exception as e:
+            self.logger.error(f"DB: Error in reset_inactive_streaks for date {current_date}: {e}", exc_info=True) 
+
+    # --- Функции для баланса и заморозки стриков ---
+
+    async def get_user_balance(self, user_id: int) -> int:
+        """Получает текущий баланс пользователя."""
+        try:
+            async with aiosqlite.connect(self.db_name) as db:
+                async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    return result[0] if result else 0
+        except Exception as e:
+            self.logger.error(f"DB: Error getting balance for user {user_id}: {e}", exc_info=True)
+            return 0 # Возвращаем 0 в случае ошибки, чтобы не блокировать операции
+
+    async def update_user_balance(self, user_id: int, amount_change: int, allow_negative: bool = False) -> bool:
+        """Обновляет баланс пользователя. amount_change может быть положительным (начисление) или отрицательным (списание)."""
+        try:
+            async with aiosqlite.connect(self.db_name) as db:
+                current_balance = await self.get_user_balance(user_id) # Получаем текущий баланс через существующий метод
+                
+                if not allow_negative and (current_balance + amount_change < 0):
+                    self.logger.warning(f"DB: Failed to update balance for user {user_id}. Change {amount_change} would result in negative balance ({current_balance + amount_change}).")
+                    return False
+                
+                await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount_change, user_id))
+                await db.commit()
+                self.logger.info(f"DB: Updated balance for user {user_id} by {amount_change}. New balance: {current_balance + amount_change}")
+                return True
+        except Exception as e:
+            self.logger.error(f"DB: Error updating balance for user {user_id}: {e}", exc_info=True)
+            return False
+
+    async def add_streak_freeze(self, user_id: int, partner_id: int, freeze_end_date: date) -> bool:
+        """Добавляет или обновляет заморозку стрика для пары."""
+        try:
+            iso_freeze_end_date = freeze_end_date.isoformat()
+            async with aiosqlite.connect(self.db_name) as db:
+                # INSERT OR REPLACE, чтобы обновить существующую заморозку, если она есть
+                await db.execute("INSERT OR REPLACE INTO streak_freezes (user_id, partner_id, freeze_end_date) VALUES (?, ?, ?)", 
+                                 (user_id, partner_id, iso_freeze_end_date))
+                # Симметричная запись для партнера, если мы хотим, чтобы заморозка была видна обоим
+                # Это вопрос дизайна: замораживает один, но действует для обоих? Пока да.
+                await db.execute("INSERT OR REPLACE INTO streak_freezes (user_id, partner_id, freeze_end_date) VALUES (?, ?, ?)", 
+                                 (partner_id, user_id, iso_freeze_end_date))
+                await db.commit()
+                self.logger.info(f"DB: Added/Updated streak freeze for pair {user_id}-{partner_id} until {iso_freeze_end_date}.")
+                return True
+        except Exception as e:
+            self.logger.error(f"DB: Error adding streak freeze for {user_id}-{partner_id}: {e}", exc_info=True)
+            return False
+
+    async def get_active_freeze(self, user_id: int, partner_id: int, current_date: date) -> Optional[date]:
+        """Проверяет, активна ли заморозка для пары на указанную current_date."""
+        try:
+            async with aiosqlite.connect(self.db_name) as db:
+                async with db.execute("SELECT freeze_end_date FROM streak_freezes WHERE user_id = ? AND partner_id = ?", (user_id, partner_id)) as cursor:
+                    result = await cursor.fetchone()
+                    if result and result[0]:
+                        freeze_end_dt = datetime.strptime(result[0], '%Y-%m-%d').date()
+                        if freeze_end_dt >= current_date:
+                            return freeze_end_dt # Заморозка активна
+                        else:
+                            # Заморозка истекла, можно её удалить для очистки
+                            self.logger.info(f"DB: Stale freeze record found for {user_id}-{partner_id} (ended {freeze_end_dt}). Removing.")
+                            await self.remove_streak_freeze(user_id, partner_id) # Вызовем удаление
+                            return None
+                    return None
+        except Exception as e:
+            self.logger.error(f"DB: Error checking active freeze for {user_id}-{partner_id}: {e}", exc_info=True)
+            return None
+
+    async def remove_streak_freeze(self, user_id: int, partner_id: int):
+        """Удаляет запись о заморозке стрика для пары."""
+        try:
+            async with aiosqlite.connect(self.db_name) as db:
+                await db.execute("DELETE FROM streak_freezes WHERE user_id = ? AND partner_id = ?", (user_id, partner_id))
+                await db.execute("DELETE FROM streak_freezes WHERE user_id = ? AND partner_id = ?", (partner_id, user_id)) # Симметрично
+                await db.commit()
+                self.logger.info(f"DB: Removed streak freeze for pair {user_id}-{partner_id}.")
+        except Exception as e:
+            self.logger.error(f"DB: Error removing streak freeze for {user_id}-{partner_id}: {e}", exc_info=True) 
