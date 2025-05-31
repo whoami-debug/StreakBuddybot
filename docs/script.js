@@ -85,14 +85,16 @@ let currentUserBalance = 0; // Храним баланс локально
 
 const FREEZE_COST_PER_DAY = 1; // Стоимость заморозки (должна совпадать с серверной)
 
-// Для текущей конфигурации: фронтенд на GitHub Pages, бэкенд локально.
-// Поэтому API_BASE_URL всегда должен указывать на ваш локальный бэкенд.
-// const API_BASE_URL = 'http://localhost:8080'; 
+// Определяем базовый URL для API
+const IS_LOCALHOST_DEBUG = window.location.hostname === 'localhost' || 
+                           window.location.hostname === '127.0.0.1' || 
+                           window.location.protocol === 'file:';
 
-// Используем ngrok URL для доступа к локальному бэкенду через HTTPS
-const API_BASE_URL = 'https://ba78-80-110-47-123.ngrok-free.app';
+const API_BASE_URL = IS_LOCALHOST_DEBUG 
+    ? 'http://localhost:8080' 
+    : 'https://a10c-80-110-47-123.ngrok-free.app'; // Используем новый ngrok URL для удаленного доступа
 
-console.log('script.js: Variables initialized');
+console.log('script.js: Variables initialized. IS_LOCALHOST_DEBUG:', IS_LOCALHOST_DEBUG, 'API_BASE_URL:', API_BASE_URL);
 
 function showFeedback(message, isError = false) {
     console.log('script.js: showFeedback called with:', message, 'isError:', isError);
