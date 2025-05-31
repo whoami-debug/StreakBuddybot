@@ -14,6 +14,7 @@ from aiohttp import web
 import aiosqlite
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+import aiohttp_cors
 
 from database import Database
 from config import BOT_TOKEN, WEBAPP_URL
@@ -478,7 +479,15 @@ async def handle_message(message: Message):
     chat_id = message.chat.id
     today = datetime.now(timezone.utc).date()
 
-    logger.info(f"Сообщение от {username} ({user_id}) в чате {chat_id} ({message.chat.type})")
+    # Добавляем текст сообщения в лог
+    message_text_log = f"Сообщение от {username} ({user_id}) в чате {chat_id} ({message.chat.type})"
+    if message.text:
+        message_text_log += f" | Текст: {message.text}"
+    elif message.caption:
+        message_text_log += f" | Подпись к медиа: {message.caption}"
+    # Можно добавить и другие типы контента, если нужно (фото, стикеры и т.д.)
+
+    logger.info(message_text_log)
 
     # Игнорируем сообщения не от пользователей или служебные в группах
     if not message.from_user or message.from_user.is_bot:
@@ -833,9 +842,28 @@ async def main():
 
     logger.info("Хендлеры зарегистрированы.")
 
-    # Запускаем веб-сервер (если он все еще нужен, если нет - можно убрать)
+    # Запускаем веб-сервер
     app = web.Application()
-    app.add_routes(routes)
+
+    # Настройка CORS
+    cors = aiohttp_cors.setup(app, defaults={
+        "https://whoami-debug.github.io": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",  # Разрешаем Content-Type и другие необходимые заголовки
+            allow_methods="*"   # Разрешаем GET и POST
+        ),
+        # Можно добавить и другие доверенные источники, например, для локальной разработки
+        # "http://localhost:8000": aiohttp_cors.ResourceOptions(...),
+    })
+
+    # Применяем CORS ко всем маршрутам, определенным в `routes` (ваша RouteTableDef)
+    # Сначала добавляем маршруты в приложение, затем настраиваем CORS для каждого из них.
+    app.add_routes(routes) # Сначала регистрируем все пути из RouteTableDef
+
+    for route in list(app.router.routes()): # Теперь итерируемся по зарегистрированным маршрутам
+        cors.add(route) # Применяем конфигурацию CORS по умолчанию (из defaults) к каждому маршруту
+    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, 'localhost', 8080)
