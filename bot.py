@@ -256,23 +256,12 @@ async def handle_webapp_data(message: Message):
                                 f"Ваша серия: {streak_count} {days_word} подряд 🎉"
                             )
             
-            await message.answer("✅ Общение за сегодня отмечено!")
+            # Отправляем обновленные данные в веб-интерфейс
+            await send_streaks_data(message.from_user.id)
             
         elif action == 'get_streaks':
-            # Возвращаем актуальный список стриков
-            user_id = message.from_user.id
-            streaks = await db.get_user_streaks(user_id, user_id)
-            
-            streak_data = []
-            for username, count in streaks:
-                last_chat = await db.get_last_chat_date(user_id, await db.get_user_id_by_username(username))
-                streak_data.append({
-                    'username': username,
-                    'count': count,
-                    'last_chat': 'Сегодня' if last_chat == datetime.now(timezone.utc).date() else 'Вчера' if (datetime.now(timezone.utc).date() - last_chat).days == 1 else f"{last_chat.strftime('%d.%m.%Y')}"
-                })
-            
-            await message.answer(json.dumps({'streaks': streak_data}))
+            # Отправляем актуальные данные о стриках
+            await send_streaks_data(message.from_user.id)
             
         elif action == 'select_user':
             # Обработка выбора пользователя из веб-интерфейса
@@ -281,9 +270,46 @@ async def handle_webapp_data(message: Message):
                 # Эмулируем команду /chat
                 command = CommandObject(command='chat', args=f'@{target_username}')
                 await cmd_chat(message, command)
+                # После добавления пользователя отправляем обновленные данные
+                await send_streaks_data(message.from_user.id)
             
     except json.JSONDecodeError:
         await message.answer("❌ Произошла ошибка при обработке данных.")
+
+async def send_streaks_data(user_id: int):
+    """Отправка данных о стриках в веб-интерфейс"""
+    streaks = await db.get_user_streaks(user_id, user_id)
+    
+    streak_data = []
+    for username, count in streaks:
+        partner_id = await db.get_user_id_by_username(username)
+        if partner_id:
+            last_chat = await db.get_last_chat_date(user_id, partner_id)
+            today = datetime.now(timezone.utc).date()
+            
+            if last_chat:
+                days_diff = (today - last_chat).days
+                last_chat_text = (
+                    "Сегодня" if days_diff == 0 else
+                    "Вчера" if days_diff == 1 else
+                    last_chat.strftime("%d.%m.%Y")
+                )
+            else:
+                last_chat_text = "Нет общения"
+            
+            streak_data.append({
+                'username': username,
+                'count': count,
+                'last_chat': last_chat_text
+            })
+    
+    # Отправляем данные в формате, который ожидает веб-интерфейс
+    await bot.send_message(
+        user_id,
+        json.dumps({
+            'streaks': streak_data
+        })
+    )
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
