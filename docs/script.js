@@ -131,7 +131,11 @@ async function fetchStreaks() {
     console.log('script.js: Attempting to fetch from:', apiUrl);
 
     try {
-        const response = await fetch(apiUrl);
+        const response = await fetch(apiUrl, {
+            headers: {
+                'ngrok-skip-browser-warning': 'true'
+            }
+        });
         console.log('script.js: Fetch response received:', response);
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: "Не удалось получить детали ошибки от сервера (json parsing failed)" }));
@@ -201,7 +205,10 @@ async function markToday(partnerId, partnerUsername) {
     try {
         const response = await fetch(apiUrlMark, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'ngrok-skip-browser-warning': 'true'
+            },
             body: JSON.stringify({ user_id: currentUserId, partner_id: partnerId }),
         });
         console.log('script.js: Mark today response received:', response);
@@ -227,10 +234,10 @@ async function markToday(partnerId, partnerUsername) {
 }
 
 async function promptFreezeStreak(partnerId, partnerUsernameSafe) {
-    const partnerUsernameDisplay = partnerUsernameSafe.replace(/&quot;/g, '"').replace(/\\\\'/g, "'");
+    const partnerUsernameDisplay = partnerUsernameSafe.replace(/&quot;/g, '"').replace(/\\'/g, "'");
     console.log('script.js: promptFreezeStreak called for partnerId:', partnerId, 'partnerUsername:', partnerUsernameDisplay);
 
-    const daysToFreezeStr = prompt(`На сколько дней вы хотите заморозить стрик с @${partnerUsernameDisplay}?\\nСтоимость: ${FREEZE_COST_PER_DAY} балл(а) за день.\\nМаксимум: 30 дней.`);
+    const daysToFreezeStr = prompt(`На сколько дней вы хотите заморозить стрик с @${partnerUsernameDisplay}?\nСтоимость: ${FREEZE_COST_PER_DAY} балл(а) за день.\nМаксимум: 30 дней.`);
 
     if (daysToFreezeStr === null) { // Пользователь нажал "Отмена"
         showFeedback('Заморозка отменена.', false);
@@ -262,7 +269,10 @@ async function promptFreezeStreak(partnerId, partnerUsernameSafe) {
     try {
         const response = await fetch(apiUrlFreeze, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'ngrok-skip-browser-warning': 'true'
+            },
             body: JSON.stringify({ user_id: currentUserId, partner_id: partnerId, days: daysToFreeze }),
         });
         console.log('script.js: Freeze streak response received:', response);
