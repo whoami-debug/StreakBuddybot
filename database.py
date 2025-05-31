@@ -289,11 +289,12 @@ class Database:
             self.logger.error(f"DB: Error in get_streak_count for {user_id}-{partner_id}: {e}", exc_info=True)
             return 0
 
-    async def get_user_streaks(self, current_user_id: int, current_chat_id: int) -> List[Tuple[str, int]]:
+    async def get_user_streaks(self, current_user_id: int, current_chat_id: int) -> List[Tuple[int, str, int]]:
         """Получение списка стриков пользователя.
+        Возвращает список кортежей (partner_id, partner_username, streak_count).
         Если current_chat_id это ID группы, то фильтрует стрики по активности в этой группе.
         """
-        streaks_to_show = []
+        streaks_to_show: List[Tuple[int, str, int]] = []
         try:
             async with aiosqlite.connect(self.db_name) as db:
                 # 1. Получаем все глобальные стрики пользователя
@@ -315,8 +316,8 @@ class Database:
 
                 if not is_group_context:
                     self.logger.info(f"DB: get_user_streaks - Private context (chat_id={current_chat_id}), showing all global streaks.")
-                    for _, partner_username, streak_count in all_global_streaks:
-                        streaks_to_show.append((partner_username, streak_count))
+                    for partner_id, partner_username, streak_count in all_global_streaks:
+                        streaks_to_show.append((partner_id, partner_username, streak_count))
                 else:
                     self.logger.info(f"DB: get_user_streaks - Group context (chat_id={current_chat_id}), filtering streaks.")
                     for partner_id, partner_username, streak_count in all_global_streaks:
@@ -331,7 +332,7 @@ class Database:
                         
                         if interaction_in_this_chat:
                             self.logger.info(f"DB: get_user_streaks - Streak with {partner_username} ({partner_id}) IS relevant to group {current_chat_id}.")
-                            streaks_to_show.append((partner_username, streak_count))
+                            streaks_to_show.append((partner_id, partner_username, streak_count))
                         else:
                             self.logger.info(f"DB: get_user_streaks - Streak with {partner_username} ({partner_id}) NOT relevant to group {current_chat_id} (no messages).")
             
@@ -340,7 +341,6 @@ class Database:
         except Exception as e:
             self.logger.error(f"DB: Error in get_user_streaks for user {current_user_id}, chat {current_chat_id}: {e}", exc_info=True)
             return []
-
 
     async def get_last_chat_date(self, user_id: int, partner_id: int) -> Optional[date]:
         async with aiosqlite.connect(self.db_name) as db:

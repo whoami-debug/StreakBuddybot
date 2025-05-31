@@ -1,0 +1,84 @@
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+body { background: linear-gradient(rgba(0,0,0,.7),rgba(0,0,0,.7)),url("https://images.unsplash.com/photo-1544829099-b9a0c07fad1a?q=80&w=1920") center/cover no-repeat fixed; color: #fff; min-height: 100vh; }
+.container { max-width: 800px; margin: 0 auto; padding: 20px; }
+.header { text-align: center; margin-bottom: 30px; padding: 20px; background: rgba(255,87,34,.2); border-radius: 15px; backdrop-filter: blur(10px); border: 1px solid rgba(255,87,34,.3); }
+.header h1 { font-size: 2.5em; margin-bottom: 10px; background: linear-gradient(45deg,#FF5722,#FFC107); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow:0 0 10px rgba(255,87,34,.3); }
+.header p { font-size: 1.1em; color: #ddd; }
+.streak-list { display: grid; gap: 20px; }
+.streak-card { background: rgba(0,0,0,.7); border-radius: 15px; padding: 20px; transition: transform .3s, box-shadow .3s; border: 1px solid rgba(255,87,34,.4); position: relative; overflow: hidden; }
+.streak-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.4); }
+.streak-card::before { content: ""; position: absolute; top: 0; left: -100%; width: 100%; height: 3px; background: linear-gradient(90deg, transparent, #FF5722, #FFC107, transparent); animation: flameShine 3s infinite linear; }
+.streak-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.streak-count { font-size: 2.2em; font-weight: 700; color: #FF5722; text-shadow:0 0 12px rgba(255,87,34,.6); }
+.user-pair { font-size: 1.3em; font-weight: 500; }
+.loading { text-align: center; padding: 30px; font-size: 1.3em; color: #FFC107; }
+.error { /* Used for critical errors like Telegram data fetch */
+    background: rgba(255,0,0,.2); 
+    color: #f8d7da; 
+    padding: 15px; 
+    border-radius: 10px; 
+    margin: 20px 0; 
+    border: 1px solid rgba(255,0,0,.3); 
+    text-align:center;
+}
+.empty-state { text-align: center; padding: 40px 20px; background: rgba(0,0,0,.5); border-radius: 15px; border: 1px solid rgba(255,87,34,.2); margin-top: 20px; }
+.empty-state h2 { font-size: 1.5em; margin-bottom: 10px; color: #FFC107; }
+.empty-state p { color: #bbb; font-size: 1em; }
+
+.streak-card button {
+    background-color: #FF5722;
+    color: white;
+    border: none;
+    padding: 10px 15px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1em;
+    font-weight: 500;
+    margin-top: 10px;
+    transition: background-color 0.3s, transform 0.2s;
+    display: block;
+    width: 100%;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.25);
+}
+.streak-card button:hover {
+    background-color: #E64A19;
+    transform: translateY(-2px);
+}
+.streak-card button:active {
+    transform: translateY(0px);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.feedback-message {
+    padding: 12px 15px;
+    margin: 15px auto; /* Centered */
+    max-width: 90%; /* Limit width */
+    border-radius: 8px;
+    text-align: center;
+    font-size: 1em;
+    font-weight: 500;
+    border: 1px solid transparent;
+    display: none; /* Initially hidden */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.feedback-success {
+    background-color: rgba(76, 175, 80, 0.2);
+    color: #a5d6a7; /* Lighter green for text */
+    border-color: rgba(76, 175, 80, 0.4);
+}
+.feedback-error {
+    background-color: rgba(244, 67, 54, 0.2);
+    color: #ef9a9a; /* Lighter red for text */
+    border-color: rgba(244, 67, 54, 0.4);
+}
+
+@keyframes flameShine {
+    0% { left: -100%; }
+    50%, 100% { left: 100%; }
+}
+@media (max-width:600px){
+    .container { padding:15px; }
+    .header h1 { font-size:2.2em; }
+    .streak-card { padding:15px; }
+    .user-pair { font-size: 1.1em; }
+    .streak-count { font-size: 1.8em; }
+} 

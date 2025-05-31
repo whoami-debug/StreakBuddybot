@@ -31,7 +31,7 @@ bot = Bot(token=BOT_TOKEN)
 db = Database()
 
 # Путь к веб-приложению
-WEBAPP_PATH = Path(__file__).parent / "webapp"
+WEBAPP_PATH = Path(__file__).parent / "docs"
 
 # Создаем веб-сервер
 routes = web.RouteTableDef()
@@ -59,46 +59,58 @@ async def reset_daily_caches_if_new_day():
 async def serve_webapp(request):
     return web.FileResponse(WEBAPP_PATH / 'index.html')
 
-@routes.get('/api/streaks')
-async def get_streaks(request):
+# Новый эндпоинт для WebApp
+@routes.get('/api/webapp/user_streaks')
+async def get_webapp_user_streaks(request):
     try:
-        user_id = request.query.get('user_id')
-        if not user_id:
-            return web.Response(
-                status=400,
-                text=json.dumps({'error': 'user_id is required'}),
-                content_type='application/json'
-            )
+        user_id_str = request.query.get('user_id')
+        if not user_id_str:
+            return web.json_response({'error': 'user_id is required'}, status=400)
         
-        # Получаем стрики из существующей базы данных
-        streaks = await db.get_user_streaks(int(user_id))
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            return web.json_response({'error': 'Invalid user_id format'}, status=400)
+
+        # Для WebApp всегда запрашиваем все стрики пользователя, передавая user_id как chat_id
+        streaks_data = await db.get_user_streaks(user_id, user_id) 
         
-        # Форматируем данные для веб-интерфейса
-        formatted_streaks = []
-        for streak in streaks:
-            user1_info = await bot.get_chat_member(streak['chat_id'], streak['user1_id'])
-            user2_info = await bot.get_chat_member(streak['chat_id'], streak['user2_id'])
-            
-            formatted_streak = {
-                'chat_id': streak['chat_id'],
-                'user1': user1_info.user.full_name,
-                'user2': user2_info.user.full_name,
-                'count': streak['count'],
-                'last_message': streak['last_message'].isoformat(),
-                'partner_id': streak['user2_id'] if int(user_id) == streak['user1_id'] else streak['user1_id']
-            }
-            formatted_streaks.append(formatted_streak)
-            
-        return web.Response(
-            text=json.dumps({'streaks': formatted_streaks}),
-            content_type='application/json'
-        )
+        formatted_streaks = [
+            {'partner_id': pid, 'partner_username': puname, 'streak_count': scount}
+            for pid, puname, scount in streaks_data
+        ]
+        
+        return web.json_response({'streaks': formatted_streaks})
     except Exception as e:
-        return web.Response(
-            status=500,
-            text=json.dumps({'error': str(e)}),
-            content_type='application/json'
-        )
+        logger.error(f"Error in /api/webapp/user_streaks: {e}", exc_info=True)
+        return web.json_response({'error': f'Internal server error: {str(e)}'}, status=500)
+
+# Новый эндпоинт для ручной отметки через WebApp
+@routes.post('/api/webapp/mark_today')
+async def post_webapp_mark_today(request):
+    try:
+        data = await request.json()
+        user_id_str = data.get('user_id')
+        partner_id_str = data.get('partner_id')
+
+        if not user_id_str or not partner_id_str:
+            return web.json_response({'error': 'user_id and partner_id are required'}, status=400)
+
+        try:
+            user_id = int(user_id_str)
+            partner_id = int(partner_id_str)
+        except ValueError:
+            return web.json_response({'error': 'Invalid user_id or partner_id format'}, status=400)
+
+        today = datetime.now(timezone.utc).date()
+        status_message, streak_updated = await db.mark_webapp_interaction(user_id, partner_id, today)
+        
+        return web.json_response({'message': status_message, 'streak_updated': streak_updated})
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON payload'}, status=400)
+    except Exception as e:
+        logger.error(f"Error in /api/webapp/mark_today: {e}", exc_info=True)
+        return web.json_response({'error': f'Internal server error: {str(e)}'}, status=500)
 
 # Словарь для хранения собеседников в личных сообщениях
 # Формат: {user_id: {partner_username: partner_id}}
