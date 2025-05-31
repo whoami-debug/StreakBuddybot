@@ -59,6 +59,47 @@ async def reset_daily_caches_if_new_day():
 async def serve_webapp(request):
     return web.FileResponse(WEBAPP_PATH / 'index.html')
 
+@routes.get('/api/streaks')
+async def get_streaks(request):
+    try:
+        user_id = request.query.get('user_id')
+        if not user_id:
+            return web.Response(
+                status=400,
+                text=json.dumps({'error': 'user_id is required'}),
+                content_type='application/json'
+            )
+        
+        # Получаем стрики из существующей базы данных
+        streaks = await db.get_user_streaks(int(user_id))
+        
+        # Форматируем данные для веб-интерфейса
+        formatted_streaks = []
+        for streak in streaks:
+            user1_info = await bot.get_chat_member(streak['chat_id'], streak['user1_id'])
+            user2_info = await bot.get_chat_member(streak['chat_id'], streak['user2_id'])
+            
+            formatted_streak = {
+                'chat_id': streak['chat_id'],
+                'user1': user1_info.user.full_name,
+                'user2': user2_info.user.full_name,
+                'count': streak['count'],
+                'last_message': streak['last_message'].isoformat(),
+                'partner_id': streak['user2_id'] if int(user_id) == streak['user1_id'] else streak['user1_id']
+            }
+            formatted_streaks.append(formatted_streak)
+            
+        return web.Response(
+            text=json.dumps({'streaks': formatted_streaks}),
+            content_type='application/json'
+        )
+    except Exception as e:
+        return web.Response(
+            status=500,
+            text=json.dumps({'error': str(e)}),
+            content_type='application/json'
+        )
+
 # Словарь для хранения собеседников в личных сообщениях
 # Формат: {user_id: {partner_username: partner_id}}
 dm_partners: Dict[int, Dict[str, int]] = {}
